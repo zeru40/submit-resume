@@ -1,0 +1,25 @@
+.venv/
+data/
+__pycache__/
+.pytest_cache/
+*.pyc
+artifacts/
+
+# Local credentials and generated files
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.log
+*.sqlite3
+*.sqlite3-*
+*.db
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

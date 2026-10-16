@@ -1,0 +1,142 @@
+import time
+from types import SimpleNamespace
+import pytest
+from core.store import Store
+from core.runner import Runner
+from core.control import NeedHuman
+from platforms.base import BeforeClickError
+
+def wait_done(runner):
+    deadline=time.monotonic()+5
+    while runner.snapshot()['busy'] and time.monotonic()<deadline:time.sleep(.01)
+    assert not runner.snapshot()['busy']
+
+class FakeAdapter:
+    spec={'label':'BOSS直聘'}
+    def __init__(self,*args):
+        self.page=SimpleNamespace(is_closed=lambda:False,url='https://www.zhipin.com',wait_for_timeout=lambda _:None)
+        self.contacts=0;self.resumes=0;self.external_started=False
+    def ensure_session(self,*args):return 'scope1'
+    def goto(self,url):pass
+    def verify_job(self,job):pass
+    def search(self,plan):
+        yield {'platform':'boss','external_id':'job1','title':'Python工程师','company':'公司','url':'https://www.zhipin.com/job_detail/job1.html','description':'Python工程师负责后端接口设计、系统架构和项目交付。岗位要求熟悉数据库及团队协作。','location':'上海','salary':'20-30K'}
+    def contact(self,*args):self.contacts+=1;self.external_started=True;return {'peer':'hr1','chat_url':'https://www.zhipin.com/web/geek/chat?bossId=hr1'}
+    def open_chat(self,*args):pass
+    def send_resume(self,*args):self.resumes+=1;self.external_started=True;return {'filename':'r.txt'}
+    def diagnostic(self,*args):pass
+    def close(self):pass
+
+def command():
+    return {'type':'run','mode':'auto','platforms':['boss'],'plan':{'id':'p1','max_deliveries':3,'skills':'Python','min_score':60,'interval_seconds':0},
+            'resume':{'id':'r1','text':'Python','name':'r.txt'},'job_ids':[]}
+
+def test_end_to_end_runner_does_not_repeat_delivery(tmp_path):
+    store=Store(tmp_path/'db.sqlite')
+    adapter=FakeAdapter()
+    runner=Runner(store,tmp_path,factory=lambda *args:adapter)
+    try:
+        runner.submit(command());wait_done(runner)
+        assert runner.snapshot()['state']=='completed'
+        assert store.one('SELECT status FROM applications')['status']=='delivered'
+        runner.submit(command());wait_done(runner)
+        assert adapter.contacts==adapter.resumes==1
+    finally:runner.close()
+
+def test_lost_receipt_quarantines_attempt_and_skips_next_run(tmp_path):
+    store=Store(tmp_path/'db.sqlite')
+    adapter=FakeAdapter()
+    def send(*args):adapter.external_started=True;adapter.resumes+=1;raise NeedHuman('平台已接收但回执丢失')
+    adapter.send_resume=send
+    runner=Runner(store,tmp_path,factory=lambda *args:adapter)
+    try:
+        runner.submit(command());wait_done(runner)
+        assert runner.snapshot()['state']=='needs_human'
+        assert store.one("SELECT status FROM actions WHERE kind='resume'")['status']=='unknown'
+        runner.submit(command());wait_done(runner)
+        assert adapter.resumes==1
+        assert adapter.contacts==1
+    finally:runner.close()
+
+def test_preclick_failure_can_retry_without_recontact(tmp_path):
+    store=Store(tmp_path/'db.sqlite')
+    adapter=FakeAdapter()
+    def refuse(*args):raise BeforeClickError('没有发送按钮')
+    adapter.send_resume=refuse
+    runner=Runner(store,tmp_path,factory=lambda *args:adapter)
+    try:
+        runner.submit(command());wait_done(runner)
+        assert store.one("SELECT status FROM actions WHERE kind='resume'")['status']=='failed'
+        adapter.send_resume=lambda *args:{'filename':'r.txt'}
+        runner.submit(command());wait_done(runner)
+        assert store.one('SELECT status FROM applications')['status']=='delivered'
+        assert adapter.contacts==1
+    finally:runner.close()
+
+
+def test_waiting_reply_preserves_sent_actions_and_resumes_only_attachment(tmp_path):
+    from platforms.boss import WaitingReply
+    store=Store(tmp_path/'db.sqlite');adapter=FakeAdapter()
+    def wait(*args):raise WaitingReply('双方回复后可用')
+    adapter.send_resume=wait
+    runner=Runner(store,tmp_path,factory=lambda *args:adapter)
+    try:
+        runner.submit(command());wait_done(runner)
+        assert store.one('SELECT status FROM applications')['status']=='waiting_reply'
+        assert runner.snapshot()['delivered']==0
+        assert store.one("SELECT status FROM actions WHERE kind='resume'")['status']=='failed'
+        adapter.send_resume=lambda *args:{'filename':'r.txt'}
+        runner.submit(command());wait_done(runner)
+        assert store.one('SELECT status FROM applications')['status']=='delivered'
+        assert adapter.contacts==1
+    finally:runner.close()
+
+
+def test_short_message_run_skips_platform_history_and_never_resends(tmp_path):
+    store=Store(tmp_path/'db.sqlite');adapter=FakeAdapter();adapter.greetings=[]
+    adapter.existing_companies=lambda scope:set()
+    adapter.already_contacted=lambda:False
+    def greet(message,*args):adapter.greetings.append(message);return {'message':message}
+    adapter.greet=greet
+    cmd=command();cmd['plan'].update(personalized_greeting=True,greeting_style='job_interest',communication_only=True,skip_existing_contacts=True)
+    runner=Runner(store,tmp_path,factory=lambda *args:adapter)
+    try:
+        runner.submit(cmd);wait_done(runner)
+        assert store.one('SELECT status FROM applications')['status']=='message_sent'
+        runner.submit(cmd);wait_done(runner)
+        assert len(adapter.greetings)==adapter.contacts==1 and adapter.resumes==0
+        assert len(adapter.greetings[0])<=120
+    finally:runner.close()
+
+
+def test_manual_platform_conversation_is_skipped_without_local_ledger(tmp_path):
+    store=Store(tmp_path/'db.sqlite');adapter=FakeAdapter()
+    adapter.existing_companies=lambda scope:{'公司'}
+    cmd=command();cmd['plan'].update(skip_existing_contacts=True,communication_only=True)
+    runner=Runner(store,tmp_path,factory=lambda *args:adapter)
+    try:
+        runner.submit(cmd);wait_done(runner)
+        assert adapter.contacts==0 and adapter.resumes==0
+        assert not store.one('SELECT id FROM actions')
+    finally:runner.close()
+
+
+def test_unknown_contact_is_quarantined_while_other_jobs_continue(tmp_path):
+    store=Store(tmp_path/'db.sqlite');adapter=FakeAdapter()
+    jobs=list(adapter.search({}));other=dict(jobs[0],external_id='job2',company='另一公司');jobs.append(other)
+    adapter.search=lambda plan:iter(jobs)
+    adapter.existing_companies=lambda scope:set();adapter.already_contacted=lambda:False
+    def contact(job,*args):
+        adapter.contacts+=1;adapter.external_started=True
+        if job['external_id']=='job1':raise NeedHuman('沟通结果无法确认')
+        return {'peer':'hr2','chat_url':'https://www.zhipin.com/web/geek/chat?bossId=hr2'}
+    adapter.contact=contact;adapter.greet=lambda message,*args:{'message':message}
+    cmd=command();cmd['plan'].update(skip_existing_contacts=True,communication_only=True,personalized_greeting=True,greeting_style='job_interest')
+    runner=Runner(store,tmp_path,factory=lambda *args:adapter)
+    try:
+        runner.submit(cmd);wait_done(runner)
+        assert runner.snapshot()['state']=='completed'
+        assert store.one("SELECT status FROM actions WHERE kind='contact' AND status='unknown'")
+        assert store.one("SELECT status FROM applications WHERE job_id='boss:job2'")['status']=='message_sent'
+        assert adapter.contacts==2
+    finally:runner.close()
