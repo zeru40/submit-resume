@@ -20,7 +20,7 @@ class FakeAdapter:
     def goto(self,url):pass
     def verify_job(self,job):pass
     def search(self,plan):
-        yield {'platform':'boss','external_id':'job1','title':'Python工程师','company':'公司','url':'https://www.zhipin.com/job_detail/job1.html','description':'Python工程师负责后端接口设计、系统架构和项目交付。岗位要求熟悉数据库及团队协作。','location':'上海','salary':'20-30K'}
+        yield {'platform':'boss','external_id':'job1','title':'Python工程师','company':'公司','url':'https://www.zhipin.com/job_detail/job1.html','description':'岗位职责：\n负责Python后端接口设计、系统架构和项目交付。\n任职要求：熟悉数据库及团队协作。','location':'上海','salary':'20-30K'}
     def contact(self,*args):self.contacts+=1;self.external_started=True;return {'peer':'hr1','chat_url':'https://www.zhipin.com/web/geek/chat?bossId=hr1'}
     def open_chat(self,*args):pass
     def send_resume(self,*args):self.resumes+=1;self.external_started=True;return {'filename':'r.txt'}
