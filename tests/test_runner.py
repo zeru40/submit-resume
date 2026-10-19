@@ -6,6 +6,12 @@ from core.runner import Runner
 from core.control import NeedHuman
 from platforms.base import BeforeClickError
 
+@pytest.fixture(autouse=True)
+def immediate_test_waits(monkeypatch):
+    # Exercise pacing decisions without spending real minutes in unit tests.
+    from core.control import Control
+    monkeypatch.setattr(Control,'wait',lambda self,seconds,pump=None:self.checkpoint(pump))
+
 def wait_done(runner):
     deadline=time.monotonic()+5
     while runner.snapshot()['busy'] and time.monotonic()<deadline:time.sleep(.01)
@@ -118,6 +124,49 @@ def test_manual_platform_conversation_is_skipped_without_local_ledger(tmp_path):
         runner.submit(cmd);wait_done(runner)
         assert adapter.contacts==0 and adapter.resumes==0
         assert not store.one('SELECT id FROM actions')
+    finally:runner.close()
+
+
+def test_search_filters_protected_cards_before_fetching_details(tmp_path):
+    store=Store(tmp_path/'db.sqlite');adapter=FakeAdapter()
+    original=adapter.search
+    captured=[]
+    def search(plan):
+        captured.append(plan)
+        yield from original(plan)
+    adapter.search=search
+    runner=Runner(store,tmp_path,factory=lambda *args:adapter)
+    try:
+        runner.submit(command());wait_done(runner)
+        cmd=command();cmd.update(mode='search');cmd['plan']['skip_existing_contacts']=True
+        runner.submit(cmd);wait_done(runner)
+        assert captured[-1]['_skip_job_ids']=={'boss:job1'}
+        assert captured[-1]['_skip_companies']=={'公司'}
+        assert captured[-1]['_known_jobs']['boss:job1']['description']
+        assert adapter.contacts==adapter.resumes==1
+    finally:runner.close()
+
+
+def test_contact_pacing_survives_restart_and_old_short_interval(tmp_path,monkeypatch):
+    from core.control import Control
+    waits=[]
+    monkeypatch.setattr(Control,'wait',lambda self,seconds,pump=None:waits.append(seconds))
+    store=Store(tmp_path/'db.sqlite');adapter=FakeAdapter()
+    runner=Runner(store,tmp_path,factory=lambda *args:adapter)
+    try:
+        runner.submit(command());wait_done(runner)
+    finally:runner.close()
+    # A fresh Runner must use the persisted receipt, not an in-memory timer.
+    jobs=[dict(j,external_id='job2',company='第二家公司') for j in adapter.search({})]
+    other=FakeAdapter();other.search=lambda plan:iter(jobs)
+    store=Store(tmp_path/'db.sqlite')
+    runner=Runner(store,tmp_path,factory=lambda *args:other)
+    try:
+        cmd=command();cmd['plan']['interval_seconds']=20
+        runner.submit(cmd);wait_done(runner)
+        assert other.contacts==1
+        assert any(55 < seconds <= 60 for seconds in waits[:-1])
+        assert waits[-1]==60
     finally:runner.close()
 
 

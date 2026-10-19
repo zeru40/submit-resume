@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from platforms.base import ApplicantPlatform
 from platforms.specs import SPECS
 from core.control import Control
+import pytest
 
 class Page:
     def __init__(self,url):self.url=url;self.closed=False;self.front=False
@@ -53,6 +54,28 @@ def test_login_opens_standalone_portal_once_and_preserves_it():
 def test_blank_is_not_reported_as_a_loaded_login_page():
     obj=make([Page('about:blank')])
     assert obj.session()['state']=='page_unavailable'
+
+
+def test_restricted_url_never_becomes_a_login_retry():
+    from core.control import NeedHuman
+    obj=make([Page('https://www.zhipin.com/web/passport/zp/403.html?code=32')])
+    obj.publish=lambda *args:None
+    assert obj.session()['reason']=='access_restricted'
+    with pytest.raises(NeedHuman,match='平台已限制访问'):
+        obj.ensure_session()
+    assert obj.page.url.endswith('403.html?code=32')
+
+
+def test_navigation_budget_applies_between_search_and_detail(monkeypatch):
+    obj=make([Page('https://www.zhipin.com/web/geek/jobs')])
+    obj.navigation_interval_seconds=15
+    waits=[]
+    monkeypatch.setattr(obj.control,'wait',lambda seconds,*args:waits.append(seconds))
+    ticks=iter([100,103,115])
+    monkeypatch.setattr('platforms.base.time.monotonic',lambda:next(ticks))
+    obj.goto('https://www.zhipin.com/web/geek/jobs')
+    obj.goto('https://www.zhipin.com/job_detail/job1.html')
+    assert waits==[12]
 
 def test_visible_browser_uses_normal_edge_runtime(tmp_path,monkeypatch):
     received={}

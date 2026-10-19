@@ -2,8 +2,10 @@
 import json
 import queue
 import threading
+import time
 import uuid
 from copy import deepcopy
+from datetime import datetime
 
 from core.control import Control, Stopped, NeedHuman
 from core.store import dumps, now
@@ -207,6 +209,7 @@ class Runner:
         for code in command['platforms']:
             self.control.checkpoint()
             adapter = self._adapter(code, playwright)
+            interval_seconds = max(plan.get('interval_seconds', 60), 60 if code == 'boss' else 0)
             if adapter.page.url == 'about:blank':
                 adapter.open()
             scope = adapter.ensure_session()
@@ -228,7 +231,20 @@ class Runner:
             else:
                 # Materialize discovery before applying: applying navigates away from the list.
                 jobs = []
-                for job in adapter.search(plan):
+                search_plan = dict(plan)
+                if code == 'boss':
+                    search_plan['_known_jobs'] = {row['id']:json.loads(row['body']) for row in
+                        self.store.all("SELECT id,body FROM jobs WHERE platform='boss'")}
+                if code == 'boss' and plan.get('skip_existing_contacts'):
+                    protected = self.store.all('''SELECT DISTINCT a.job_id,j.company FROM applications a
+                        JOIN jobs j ON j.id=a.job_id WHERE a.scope=? AND j.platform='boss'
+                        AND (a.status IN ('message_sent','needs_review','delivered','waiting_reply','previously_contacted',
+                            'unavailable','withdrawn','retracted')
+                        OR EXISTS (SELECT 1 FROM actions x WHERE x.application_id=a.id
+                            AND x.status IN ('sent','pending','unknown')))''', (scope,))
+                    search_plan['_skip_job_ids'] = {row['job_id'] for row in protected}
+                    search_plan['_skip_companies'] = existing_companies | {row['company'] for row in protected}
+                for job in adapter.search(search_plan):
                     score, reasons, eligible = match_job(job, plan, resume['text'] if resume else '')
                     self.store.upsert_job(job,score,reasons,eligible)
                     jobs.append(job)
@@ -261,6 +277,9 @@ class Runner:
                     continue
                 if application['status'] == 'needs_review':
                     self.store.log('跳过结果待核验的岗位：' + job['title'], 'warning')
+                    continue
+                if plan.get('skip_existing_contacts') and application['status'] in {'unavailable','withdrawn','retracted','previously_contacted','message_sent'}:
+                    self.store.log('跳过已处理的岗位：' + job['title'])
                     continue
                 known_contact=self.store.one("SELECT status FROM actions WHERE application_id=? AND kind='contact'",(application['id'],))
                 if code!='boss' or not known_contact or known_contact['status']!='sent':
@@ -313,7 +332,7 @@ class Runner:
                         self.store.log('该岗位沟通结果待核验，本轮不重试：'+job['company']+' · '+str(exc),'warning')
                         existing_companies.add(job['company'])
                         processed_count += 1
-                        self.control.wait(plan['interval_seconds'],adapter.page.wait_for_timeout)
+                        self.control.wait(interval_seconds,adapter.page.wait_for_timeout)
                         continue
                     # Revisit the exact conversation on restart; never click contact again.
                     adapter.open_chat(receipt,scope)
@@ -331,7 +350,7 @@ class Runner:
                         existing_companies.add(job['company'])
                         self.update(message='已核验岗位沟通文案发送：'+job['company'],messaged=self.snapshot()['messaged']+1)
                         self.store.log('已发送岗位沟通文案：'+job['company']+' · '+job['title'])
-                        self.control.wait(plan['interval_seconds'],adapter.page.wait_for_timeout)
+                        self.control.wait(interval_seconds,adapter.page.wait_for_timeout)
                         continue
                     try:
                         self._action(adapter,application,'resume',lambda:adapter.send_resume(resume,receipt,scope))
@@ -351,7 +370,7 @@ class Runner:
                 processed_count += 1
                 self.update(delivered=delivery_count,message='已获得平台结果回执')
                 self.store.log('已核验投递：' + job['title'])
-                self.control.wait(plan['interval_seconds'],adapter.page.wait_for_timeout)
+                self.control.wait(interval_seconds,adapter.page.wait_for_timeout)
 
     def _action(self, adapter, application, kind, callback):
         existing = self.store.one('SELECT * FROM actions WHERE application_id=? AND kind=?', (application['id'],kind))
@@ -361,6 +380,20 @@ class Runner:
             except (ValueError,TypeError):
                 raise NeedHuman('人工确认的动作缺少后续所需的会话信息，请在平台完成后续操作')
             return receipt
+        if kind in {'contact','apply'}:
+            # Across runs and restarts: old short-interval plans cannot start a
+            # second BOSS conversation within one minute of the last attempt.
+            job = self.store.one('SELECT platform FROM jobs WHERE id=?', (application['job_id'],))
+            if job and job['platform'] == 'boss':
+                previous = self.store.one('''SELECT x.updated_at FROM actions x
+                    JOIN applications a ON a.id=x.application_id JOIN jobs j ON j.id=a.job_id
+                    WHERE j.platform='boss' AND x.kind IN ('contact','apply')
+                    AND x.status IN ('sent','unknown','pending') ORDER BY x.updated_at DESC LIMIT 1''')
+                if previous:
+                    delay = max(0, 60 - (time.time() - datetime.fromisoformat(previous['updated_at']).timestamp()))
+                    if delay:
+                        self.update(message='等待主动沟通间隔（至少60秒）')
+                        self.control.wait(delay, adapter.page.wait_for_timeout)
         token = self.store.reserve(application['id'],kind)
         if not token:
             raise NeedHuman('该动作已有执行记录且结果待核验，请先检查平台结果')

@@ -28,6 +28,13 @@ def test_opens_directly_without_login(client):
     assert '求职投递助手' in response.text
     assert client.get('/api/overview').json()['jobs']==0
 
+
+def test_new_plan_defaults_to_small_batch_and_history_deduplication(client):
+    p=plan(client)
+    assert p['max_jobs']==10 and p['max_pages']==1
+    assert p['max_deliveries']==5 and p['interval_seconds']==60
+    assert p['skip_existing_contacts'] is True
+
 def test_requires_local_token_and_rejects_cross_origin(client):
     assert client.post('/api/plans',json={},headers={'X-App-Token':'wrong'}).status_code==403
     assert client.post('/api/plans',json={},headers={'Origin':'https://external.example'}).status_code==403

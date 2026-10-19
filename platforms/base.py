@@ -30,6 +30,7 @@ class ApplicantPlatform:
         self.page.set_default_timeout(6000)
         self.scope = ''
         self.external_started = False
+        self.navigation_interval_seconds = 15 if code == 'boss' else 0
 
     def select_page(self):
         """A restored login tab can sit behind an initial about:blank tab."""
@@ -88,6 +89,11 @@ class ApplicantPlatform:
     def goto(self, url):
         self.checkpoint()
         self.assert_url(url)
+        previous = getattr(self, '_last_navigation', None)
+        if previous is not None:
+            delay = max(0, getattr(self, 'navigation_interval_seconds', 0) - (time.monotonic() - previous))
+            self.control.wait(delay, self.page.wait_for_timeout)
+        self._last_navigation = time.monotonic()
         self.page.goto(url, wait_until='commit', timeout=20000)
         self.page.wait_for_timeout(1000)
 
@@ -130,7 +136,13 @@ class ApplicantPlatform:
         host = urlsplit(url).hostname or ''
         if host not in self.spec['hosts']:
             return {'state':'waiting_login', 'message':'请在平台页面完成登录', 'account':''}
+        if self.code == 'boss' and urlsplit(url).path == '/web/passport/zp/403.html':
+            return {'state':'needs_human', 'reason':'access_restricted',
+                    'message':'平台已限制访问，请停止操作并等待平台解除限制；重新登录不能视为已恢复', 'account':''}
         body = self.page.locator('body').inner_text(timeout=5000)
+        if any(x in body for x in ('访问受限', '已暂时被限制访问', '请勿频繁提交刷新请求')):
+            return {'state':'needs_human', 'reason':'access_restricted',
+                    'message':'平台已限制访问，请停止操作并等待平台解除限制；重新登录不能视为已恢复', 'account':''}
         if any(x in body for x in ('访问过于频繁', '请完成安全验证', '账号异常', '滑动验证', '请完成验证',
                                    '今日沟通人数已达上限','今日沟通数量已达上限','沟通人数已达上限')):
             return {'state':'needs_human', 'message':'平台要求验证，请人工处理', 'account':''}
@@ -207,6 +219,9 @@ class ApplicantPlatform:
 
     def search(self, plan):
         scope = self.ensure_session()
+        if getattr(self, '_search_cache_scope', None) != scope:
+            self._search_cache_scope = scope
+            self._search_cache = {}
         seen = set()
         emitted = 0
         for page_num in range(1, plan['max_pages'] + 1):
@@ -241,12 +256,32 @@ class ApplicantPlatform:
                     continue
                 self.assert_url(href)
                 seen.add(ident)
-                batch.append({'platform':self.code, 'external_id':ident, 'url':href,
+                job = {'platform':self.code, 'external_id':ident, 'url':href,
                     'search_keyword':plan['keyword'],
                     'title':self.text(self.spec['title'], card) or link.inner_text().strip(),
                     'company':self.text(self.spec['company'], card),
-                    'salary':self.text(self.spec['salary'], card), 'location':self.text(self.spec['location'], card)})
+                    'salary':self.text(self.spec['salary'], card), 'location':self.text(self.spec['location'], card)}
+                if (f'{self.code}:{ident}' in plan.get('_skip_job_ids', ())
+                        or job['company'] in plan.get('_skip_companies', ())):
+                    continue
+                batch.append(job)
             for job in batch:
+                stored = plan.get('_known_jobs', {}).get(f"{self.code}:{job['external_id']}")
+                if (stored and len(stored.get('description', '')) >= 30
+                        and all(stored.get(k) == job.get(k) for k in ('title','company'))):
+                    yield dict(job, description=stored['description'])
+                    emitted += 1
+                    if emitted >= plan['max_jobs']:
+                        return
+                    continue
+                cached = self._search_cache.get(job['external_id'])
+                if (cached and time.monotonic() - cached['read_at'] < 3600
+                        and all(cached['job'].get(k) == job.get(k) for k in ('title','company','salary','location'))):
+                    yield dict(job, description=cached['job']['description'])
+                    emitted += 1
+                    if emitted >= plan['max_jobs']:
+                        return
+                    continue
                 self.goto(job['url'])
                 self.ensure_session(scope)
                 self.verify_job(job)
@@ -257,6 +292,8 @@ class ApplicantPlatform:
                     if len(job['description']) >= 30:
                         break
                     self.page.wait_for_timeout(300)
+                if len(job['description']) >= 30:
+                    self._search_cache[job['external_id']] = {'read_at':time.monotonic(), 'job':dict(job)}
                 yield job
                 emitted += 1
                 if emitted >= plan['max_jobs']:

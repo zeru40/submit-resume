@@ -32,7 +32,7 @@ class Plan(BaseModel):
     exclude_keywords: str = Field(default='',max_length=2000)
     min_score: int = Field(default=60,ge=0,le=100)
     max_pages: int = Field(default=1,ge=1,le=10)
-    max_jobs: int = Field(default=20,ge=1,le=100)
+    max_jobs: int = Field(default=10,ge=1,le=100)
     max_deliveries: int = Field(default=5,ge=1,le=50)
     interval_seconds: int = Field(default=60,ge=10,le=3600)
     resume_id: str = ''
@@ -40,7 +40,7 @@ class Plan(BaseModel):
     personalized_greeting: bool = True
     greeting_style: str = Field(default='resume_evidence',pattern=r'^(resume_evidence|job_interest)$')
     communication_only: bool = False
-    skip_existing_contacts: bool = False
+    skip_existing_contacts: bool = True
     zhilian_online_resume: bool = False
 
 class RunBody(BaseModel):

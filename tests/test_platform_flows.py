@@ -53,6 +53,80 @@ def boss_routes(route):
         html=ACCOUNT+'''<div class="job-card-wrapper"><a href="/job_detail/job1.html"><span class="job-name">Python 后端</span></a><span class="company-name">测试公司</span><span class="salary">15-25K</span><span class="job-area">上海</span></div>'''
     route.fulfill(content_type='text/html; charset=utf-8',body=html)
 
+
+def test_search_reuses_recent_details_across_keywords_but_not_accounts(browser,tmp_path):
+    details=[]
+    def handler(route):
+        if '/job_detail/' in route.request.url:details.append(route.request.url)
+        boss_routes(route)
+    a=adapter(browser,BossApplicant,tmp_path,handler)
+    plan={'keyword':'Python','boss_city_code':'101230200','max_pages':1,'max_jobs':10}
+    try:
+        a.goto('https://www.zhipin.com/web/geek/jobs')
+        first=list(a.search(plan))
+        second=list(a.search(dict(plan,keyword='AI')))
+        assert len(details)==1
+        assert first[0]['description']==second[0]['description']
+        assert second[0]['search_keyword']=='AI'
+        a._search_cache['job1']['read_at']-=3601
+        list(a.search(plan))
+        assert len(details)==2
+        a._search_cache_scope='different-account'
+        list(a.search(plan))
+        assert len(details)==3
+    finally:a.close()
+
+
+@pytest.mark.parametrize('guard',[{'_skip_job_ids':{'boss:job1'}},{'_skip_companies':{'测试公司'}}])
+def test_protected_cards_do_not_open_detail_pages(browser,tmp_path,guard):
+    details=[]
+    def handler(route):
+        if '/job_detail/' in route.request.url:details.append(route.request.url)
+        boss_routes(route)
+    a=adapter(browser,BossApplicant,tmp_path,handler)
+    try:
+        a.goto('https://www.zhipin.com/web/geek/jobs')
+        plan=dict(keyword='Python',boss_city_code='101230200',max_pages=1,max_jobs=10,**guard)
+        assert list(a.search(plan))==[]
+        assert details==[]
+    finally:a.close()
+
+
+def test_saved_job_description_avoids_detail_navigation_after_restart(browser,tmp_path):
+    details=[]
+    def handler(route):
+        if '/job_detail/' in route.request.url:details.append(route.request.url)
+        boss_routes(route)
+    plan={'keyword':'Python','boss_city_code':'101230200','max_pages':1,'max_jobs':10}
+    a=adapter(browser,BossApplicant,tmp_path,handler)
+    try:
+        a.goto('https://www.zhipin.com/web/geek/jobs')
+        job=list(a.search(plan))[0]
+    finally:a.close()
+    b=adapter(browser,BossApplicant,tmp_path,handler)
+    try:
+        b.goto('https://www.zhipin.com/web/geek/jobs')
+        saved={'boss:job1':job}
+        cached=list(b.search(dict(plan,keyword='AI',_known_jobs=saved)))
+        assert len(details)==1
+        assert cached[0]['description']==job['description']
+        assert cached[0]['search_keyword']=='AI'
+        # Changed identity on the card invalidates a public-description cache.
+        saved['boss:job1']=dict(job,company='之前的公司')
+        list(b.search(dict(plan,_known_jobs=saved)))
+        assert len(details)==2
+    finally:b.close()
+
+
+def test_restriction_text_takes_precedence_over_account_header(browser,tmp_path):
+    def handler(route):
+        route.fulfill(content_type='text/html; charset=utf-8',body=ACCOUNT+'访问受限：您的账户存在异常行为，已暂时被限制访问！')
+    a=adapter(browser,BossApplicant,tmp_path,handler)
+    try:
+        a.goto('https://www.zhipin.com/web/geek/jobs')
+        assert a.session()['reason']=='access_restricted'
+    finally:a.close()
+
 def test_boss_search_contact_message_and_resume(browser,tmp_path):
     a=adapter(browser,BossApplicant,tmp_path,boss_routes)
     try:
