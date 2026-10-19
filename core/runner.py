@@ -160,7 +160,7 @@ class Runner:
                         run_id = uuid.uuid4().hex
                         stamp = now()
                         self.store.execute('INSERT INTO runs VALUES(?,?,?,?,?,?)', (run_id,dumps(command),'running','',stamp,stamp))
-                        self.update(state='running',run_id=run_id,current='',scanned=0,matched=0,delivered=0,messaged=0,search_keyword='',keyword_index=0,keyword_total=0,message='正在执行')
+                        self.update(state='running',greeting_target=command['plan'].get('max_greetings',command['plan']['max_deliveries']),run_id=run_id,current='',scanned=0,matched=0,delivered=0,messaged=0,search_keyword='',keyword_index=0,keyword_total=0,message='正在执行')
                         self._run(command, playwright)
                         waiting=self.store.one("SELECT COUNT(*) AS n FROM applications WHERE status='waiting_reply'")['n']
                         if command['plan'].get('communication_only'):
@@ -204,6 +204,9 @@ class Runner:
             self.store.execute('UPDATE runs SET status=?,error=?,updated_at=? WHERE id=?', (status,message,now(),run_id))
 
     def _run(self, command, playwright):
+        command['plan'].setdefault('max_greetings',command['plan']['max_deliveries'])
+        if command['plan'].get('communication_only'):
+            command['plan']['max_deliveries']=max(command['plan']['max_deliveries'],command['plan']['max_greetings'])
         if command['plan'].get('matching_mode')=='ai':
             from services.ai_matching import AIError,configured
             configured(self.store)
@@ -215,17 +218,20 @@ class Runner:
         # Any login, restriction, navigation or send error exits this whole loop.
         command.setdefault('account_scopes',{})
         attempted=0
-        maximum=min(command['plan']['max_deliveries'],5)
+        maximum=command['plan']['max_deliveries']
         for index,keyword in enumerate(keywords[:3]):
             self.control.checkpoint()
-            if attempted>=maximum:break
+            if attempted>=maximum or self._greeting_limit(command['plan']):break
             self.update(search_keyword=keyword,keyword_index=index+1,keyword_total=min(len(keywords),3))
             child=dict(command,search_keywords=[],job_ids=[],plan=dict(command['plan'],keyword=keyword,
-                max_pages=1,max_jobs=5,max_deliveries=maximum-attempted))
+                max_deliveries=maximum-attempted))
             attempted+=self._run_single(child,playwright,root_command=command)
             command['keywords_completed']=index+1
-            if index+1<len(keywords[:3]) and attempted<maximum:
+            if index+1<len(keywords[:3]) and attempted<maximum and not self._greeting_limit(command['plan']):
                 self.control.wait(60)
+
+    def _greeting_limit(self, plan):
+        return self.snapshot()['messaged'] >= plan.get('max_greetings',plan.get('max_deliveries',5))
 
     def _assess(self, job, plan, resume_text):
         job.pop('ai_assessment',None)
@@ -296,6 +302,7 @@ class Runner:
                 continue
             for job in jobs:
                 self.control.checkpoint(adapter.page.wait_for_timeout)
+                if self._greeting_limit(plan):return processed_count
                 if code=='boss' and plan.get('skip_existing_contacts'):
                     protected=self.store.one('''SELECT a.id FROM applications a JOIN jobs j ON j.id=a.job_id
                         WHERE a.scope=? AND j.platform='boss' AND (a.job_id=? OR j.company=?)
@@ -399,12 +406,14 @@ class Runner:
                                 result['composition']=composition
                             return result
                         self._action(adapter,application,'greeting',send_greeting)
+                        self.update(messaged=self.snapshot()['messaged']+1)
                     if plan.get('communication_only'):
                         self.store.application_status(application['id'],'message_sent')
                         processed_count += 1
                         existing_companies.add(job['company'])
-                        self.update(message='已核验岗位沟通文案发送：'+job['company'],messaged=self.snapshot()['messaged']+1)
+                        self.update(message='已核验岗位沟通文案发送：'+job['company'])
                         self.store.log('已发送岗位沟通文案：'+job['company']+' · '+job['title'])
+                        if self._greeting_limit(plan):return processed_count
                         self.control.wait(interval_seconds,adapter.page.wait_for_timeout)
                         continue
                     try:
@@ -424,6 +433,7 @@ class Runner:
                 delivery_count += 1
                 processed_count += 1
                 self.update(delivered=delivery_count,message='已获得平台结果回执')
+                if self._greeting_limit(plan):return processed_count
                 self.store.log('已核验投递：' + job['title'])
                 self.control.wait(interval_seconds,adapter.page.wait_for_timeout)
 

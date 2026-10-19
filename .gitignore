@@ -23,3 +23,5 @@ htmlcov/
 .idea/
 .DS_Store
 Thumbs.db
+workspace.local.json
+workspace.local.tmp

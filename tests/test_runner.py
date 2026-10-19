@@ -302,3 +302,19 @@ def test_ai_city_gate_avoids_model_call_and_discards_stale_assessment(tmp_path):
         score,_,eligible=runner._assess(job,{'matching_mode':'ai','city':'厦门'},'Python')
         assert not eligible and score==0 and 'ai_assessment' not in job
     finally:runner.close()
+
+
+@pytest.mark.parametrize('target',[1,3,7])
+def test_successful_greeting_target_across_keywords(tmp_path,target):
+    store=Store(tmp_path/'db.sqlite');adapter=FakeAdapter();sent=[]
+    original=list(adapter.search({}))[0]
+    adapter.search=lambda plan:iter(dict(original,external_id=f"{plan['keyword']}-{i}",company=f"{plan['keyword']}-{i}") for i in range(4))
+    adapter.greet=lambda message,*args:sent.append(message) or {'message':message}
+    cmd=command();cmd['search_keywords']=['first','second','third']
+    cmd['plan'].update(max_greetings=target,max_deliveries=12,communication_only=True,greeting='岗位定制招呼')
+    runner=Runner(store,tmp_path,factory=lambda *args:adapter)
+    try:
+        runner.submit(cmd);wait_done(runner)
+        assert runner.snapshot()['state']=='completed'
+        assert runner.snapshot()['messaged']==len(sent)==adapter.contacts==target
+    finally:runner.close()

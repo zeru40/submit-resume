@@ -36,6 +36,7 @@ class Plan(BaseModel):
     max_pages: int = Field(default=1,ge=1,le=10)
     max_jobs: int = Field(default=10,ge=1,le=100)
     max_deliveries: int = Field(default=5,ge=1,le=50)
+    max_greetings: int = Field(default=5,ge=1,le=50)
     interval_seconds: int = Field(default=60,ge=10,le=3600)
     resume_id: str = ''
     greeting: str = Field(default='',max_length=500)
@@ -52,7 +53,7 @@ class ResumeRunBody(BaseModel):
     model_config = ConfigDict(extra='forbid')
     city: str = Field(default='厦门',min_length=1,max_length=40)
     boss_city_code: str = Field(default='101230200',pattern=r'^\d{3,12}$')
-    max_contacts: int = Field(default=5,ge=1,le=5)
+    max_contacts: int = Field(default=5,ge=1,le=50)
     matching_mode: str=Field(default='ai',pattern=r'^(rules|ai)$')
 
 class RunBody(BaseModel):
@@ -61,6 +62,10 @@ class RunBody(BaseModel):
     mode: str = Field(pattern=r'^(search|auto)$')
     platforms: list[str] = Field(min_length=1,max_length=2)
     job_ids: list[str] = Field(default_factory=list,max_length=100)
+
+class WorkspaceBody(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    data_dir: str = Field(min_length=1,max_length=1000)
 
 class ReviewBody(BaseModel):
     sent: bool
@@ -191,8 +196,9 @@ def create_app(data_dir=None, runner_factory=Runner):
         ai=configured(store) if body.matching_mode=='ai' else None
         plan=Plan(name='简历自动求职 · '+resume['name'][:50],keyword=strategy['keywords'][0],
             city=body.city,boss_city_code=body.boss_city_code,resume_id=ident,
-            skills=','.join(strategy['skills']),min_score=ai['min_score'] if ai else 40,max_pages=1,max_jobs=5,
-            max_deliveries=body.max_contacts,interval_seconds=60,communication_only=True,
+            skills=','.join(strategy['skills']),min_score=ai['min_score'] if ai else 40,
+            max_pages=min(10,(body.max_contacts+29)//30),max_jobs=body.max_contacts,
+            max_deliveries=body.max_contacts,max_greetings=body.max_contacts,interval_seconds=60,communication_only=True,
             personalized_greeting=True,greeting_style='job_interest',skip_existing_contacts=True,resume_based=True,
             search_keywords=strategy['keywords'],matching_mode=body.matching_mode)
         value=save_plan(plan)
@@ -343,7 +349,26 @@ def create_app(data_dir=None, runner_factory=Runner):
     @app.get('/api/settings')
     def settings():
         return {'data_dir':str(directory),'matching':'大模型 / 本地规则','platforms':['boss','zhilian'],
+                'next_data_dir':config.saved_directory(),'directory_locked':bool(config.os.environ.get('SUBMIT_RESUME_DATA')),
                 'ai':public_settings(store),'version':'0.2.0','resume_types':['PDF','DOCX','TXT']}
+
+    @app.put('/api/settings/workspace')
+    def workspace(body:WorkspaceBody):
+        if runner.snapshot()['busy']:raise ValueError('请先停止任务再修改工作空间')
+        return {'next_data_dir':config.save_directory(body.data_dir),'restart_required':True}
+
+    @app.post('/api/settings/workspace/pick')
+    def pick_workspace():
+        if runner.snapshot()['busy']:raise ValueError('请先停止任务再选择工作空间')
+        import tkinter as tk
+        from tkinter import filedialog
+        root=tk.Tk()
+        root.withdraw()
+        root.attributes('-topmost',True)
+        try:
+            selected=filedialog.askdirectory(parent=root,title='选择本地工作空间',initialdir=str(directory))
+            return {'data_dir':selected or ''}
+        finally:root.destroy()
 
     @app.put('/api/settings/ai')
     def save_ai(body:AISettings):
