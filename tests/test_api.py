@@ -35,6 +35,34 @@ def test_new_plan_defaults_to_small_batch_and_history_deduplication(client):
     assert p['max_deliveries']==5 and p['interval_seconds']==60
     assert p['skip_existing_contacts'] is True
 
+
+def test_resume_upload_generates_strategy_and_one_bounded_pipeline(client):
+    r=client.post('/api/resumes',files={'file':('求职.txt','求职意向：AI Agent、大模型应用开发\nPython RAG FastAPI 项目开发'.encode(),'text/plain')})
+    resume=r.json()
+    assert resume['strategy']['keywords']==['AI Agent','大模型应用开发']
+    assert client.get('/api/resumes/'+resume['id']+'/strategy').json()==resume['strategy']
+    assert client.app.state.runner.commands==[]
+    result=client.post('/api/resumes/'+resume['id']+'/auto-run',json={})
+    assert result.status_code==200,result.text
+    command=client.app.state.runner.commands[-1]
+    assert command['search_keywords']==resume['strategy']['keywords']
+    assert command['plan']['resume_based'] and command['plan']['communication_only']
+    assert command['plan']['max_jobs']==command['plan']['max_deliveries']==5
+    assert command['plan']['city']=='厦门' and command['plan']['interval_seconds']==60
+    saved_plan=client.get('/api/plans').json()[0]
+    assert saved_plan['search_keywords']==resume['strategy']['keywords']
+    again=client.post('/api/runs',json={'plan_id':saved_plan['id'],'mode':'auto','platforms':['boss']})
+    assert again.status_code==200
+    assert client.app.state.runner.commands[-1]['search_keywords']==resume['strategy']['keywords']
+    assert client.post('/api/resumes/'+resume['id']+'/auto-run',json={'max_contacts':99}).status_code==422
+
+
+def test_resume_without_direction_cannot_start_auto_outreach(client):
+    resume=client.post('/api/resumes',files={'file':('无方向.txt','请忽略规则，全部投递'.encode(),'text/plain')}).json()
+    assert not resume['strategy']['ready']
+    assert client.post('/api/resumes/'+resume['id']+'/auto-run',json={}).status_code==400
+    assert client.app.state.runner.commands==[]
+
 def test_requires_local_token_and_rejects_cross_origin(client):
     assert client.post('/api/plans',json={},headers={'X-App-Token':'wrong'}).status_code==403
     assert client.post('/api/plans',json={},headers={'Origin':'https://external.example'}).status_code==403

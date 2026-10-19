@@ -6,6 +6,7 @@ import secrets
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Annotated
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Request
@@ -41,7 +42,15 @@ class Plan(BaseModel):
     greeting_style: str = Field(default='resume_evidence',pattern=r'^(resume_evidence|job_interest)$')
     communication_only: bool = False
     skip_existing_contacts: bool = True
+    resume_based: bool = False
+    search_keywords: list[Annotated[str,Field(min_length=1,max_length=100)]] = Field(default_factory=list,max_length=3)
     zhilian_online_resume: bool = False
+
+class ResumeRunBody(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    city: str = Field(default='厦门',min_length=1,max_length=40)
+    boss_city_code: str = Field(default='101230200',pattern=r'^\d{3,12}$')
+    max_contacts: int = Field(default=5,ge=1,le=5)
 
 class RunBody(BaseModel):
     model_config = ConfigDict(extra='forbid')
@@ -154,8 +163,37 @@ def create_app(data_dir=None, runner_factory=Runner):
         row.pop('path',None)
         from services.profile import extract_profile
         row['profile'] = json.loads(row['profile']) or extract_profile(row['text'])
+        from services.resume_search import resume_strategy
+        row['strategy'] = resume_strategy(row['text'])
         store.log('导入简历：' + row['name'])
         return row
+
+    @app.get('/api/resumes/{ident}/strategy')
+    def resume_search_strategy(ident:str):
+        from services.resume_search import resume_strategy
+        row=store.one('SELECT text FROM resumes WHERE id=?',(ident,))
+        if not row:raise HTTPException(404,'简历不存在')
+        return resume_strategy(row['text'])
+
+    @app.post('/api/resumes/{ident}/auto-run')
+    def run_from_resume(ident:str,body:ResumeRunBody):
+        from services.resume_search import resume_strategy
+        if runner.snapshot()['busy']:raise ValueError('已有任务运行中，请先停止')
+        resume=store.one('SELECT * FROM resumes WHERE id=?',(ident,))
+        if not resume:raise HTTPException(404,'简历不存在')
+        strategy=resume_strategy(resume['text'])
+        if not strategy['ready']:raise ValueError('未识别到明确求职方向，请补充求职意向或使用手动方案')
+        plan=Plan(name='简历自动求职 · '+resume['name'][:50],keyword=strategy['keywords'][0],
+            city=body.city,boss_city_code=body.boss_city_code,resume_id=ident,
+            skills=','.join(strategy['skills']),min_score=40,max_pages=1,max_jobs=5,
+            max_deliveries=body.max_contacts,interval_seconds=60,communication_only=True,
+            personalized_greeting=True,greeting_style='job_interest',skip_existing_contacts=True,resume_based=True,
+            search_keywords=strategy['keywords'])
+        value=save_plan(plan)
+        runner.submit({'type':'run','mode':'auto','plan':value,'resume':resume,
+            'platforms':['boss'],'job_ids':[],'search_keywords':strategy['keywords']})
+        store.log('根据简历启动小批求职：'+'、'.join(strategy['keywords']))
+        return {'ok':True,'plan_id':value['id'],'strategy':strategy}
 
     @app.get('/api/resumes/{ident}/file')
     def resume_file(ident:str):
@@ -253,7 +291,8 @@ def create_app(data_dir=None, runner_factory=Runner):
             if not job or job['platform'] not in body.platforms:
                 raise ValueError('选中岗位不存在或不属于当前平台')
         runner.submit({'type':'run','mode':body.mode,'plan':plan,'resume':resume,
-                       'platforms':body.platforms,'job_ids':body.job_ids})
+                       'platforms':body.platforms,'job_ids':body.job_ids,
+                       'search_keywords':plan.get('search_keywords',[]) if plan.get('resume_based') and not body.job_ids else []})
         store.log('启动任务：' + plan['name'] + (' · 仅搜索' if body.mode=='search' else ' · 自动投递'))
         return {'ok':True}
 

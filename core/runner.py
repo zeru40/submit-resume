@@ -158,7 +158,7 @@ class Runner:
                         run_id = uuid.uuid4().hex
                         stamp = now()
                         self.store.execute('INSERT INTO runs VALUES(?,?,?,?,?,?)', (run_id,dumps(command),'running','',stamp,stamp))
-                        self.update(state='running',run_id=run_id,current='',scanned=0,matched=0,delivered=0,messaged=0,message='正在执行')
+                        self.update(state='running',run_id=run_id,current='',scanned=0,matched=0,delivered=0,messaged=0,search_keyword='',keyword_index=0,keyword_total=0,message='正在执行')
                         self._run(command, playwright)
                         waiting=self.store.one("SELECT COUNT(*) AS n FROM applications WHERE status='waiting_reply'")['n']
                         if command['plan'].get('communication_only'):
@@ -202,9 +202,29 @@ class Runner:
             self.store.execute('UPDATE runs SET status=?,error=?,updated_at=? WHERE id=?', (status,message,now(),run_id))
 
     def _run(self, command, playwright):
+        keywords=command.get('search_keywords',[])
+        if not keywords:
+            return self._run_single(command,playwright)
+        # One finite session: search a small batch, greet matches, then move on.
+        # Any login, restriction, navigation or send error exits this whole loop.
+        command.setdefault('account_scopes',{})
+        attempted=0
+        maximum=min(command['plan']['max_deliveries'],5)
+        for index,keyword in enumerate(keywords[:3]):
+            self.control.checkpoint()
+            if attempted>=maximum:break
+            self.update(search_keyword=keyword,keyword_index=index+1,keyword_total=min(len(keywords),3))
+            child=dict(command,search_keywords=[],job_ids=[],plan=dict(command['plan'],keyword=keyword,
+                max_pages=1,max_jobs=5,max_deliveries=maximum-attempted))
+            attempted+=self._run_single(child,playwright,root_command=command)
+            command['keywords_completed']=index+1
+            if index+1<len(keywords[:3]) and attempted<maximum:
+                self.control.wait(60)
+
+    def _run_single(self, command, playwright, root_command=None):
         plan = command['plan']
         resume = command.get('resume')
-        delivery_count = 0
+        delivery_count = self.snapshot()['delivered']
         processed_count = 0
         for code in command['platforms']:
             self.control.checkpoint()
@@ -221,7 +241,7 @@ class Runner:
             if command['mode']!='search' and code=='boss' and plan.get('skip_existing_contacts'):
                 existing_companies=adapter.existing_companies(scope)
             self.store.execute('UPDATE runs SET body=?,updated_at=? WHERE id=?',
-                               (dumps(command),now(),self.snapshot()['run_id']))
+                               (dumps(root_command or command),now(),self.snapshot()['run_id']))
             if command.get('job_ids'):
                 jobs = []
                 for ident in command['job_ids']:
@@ -260,7 +280,7 @@ class Runner:
                     continue
                 self.update(current=f"{job['company']} · {job['title']}", matched=self.snapshot()['matched']+1)
                 if processed_count >= plan['max_deliveries']:
-                    return
+                    return processed_count
                 if code=='boss' and plan.get('skip_existing_contacts'):
                     prior=self.store.one('''SELECT x.id FROM actions x JOIN applications a ON a.id=x.application_id
                         JOIN jobs j ON j.id=a.job_id WHERE a.scope=? AND j.platform='boss'
@@ -290,6 +310,7 @@ class Runner:
                         except BeforeClickError as exc:
                             self.store.application_status(application['id'],'unavailable')
                             self.store.log('跳过暂时无法定位的岗位：'+job['company']+' · '+str(exc),'warning')
+                            if plan.get('resume_based'):raise
                             continue
                     else:
                         adapter.goto(job['url'])
@@ -324,6 +345,7 @@ class Runner:
                     try:
                         receipt = self._action(adapter, application, 'contact', lambda: adapter.contact(job,scope))
                     except NeedHuman as exc:
+                        if plan.get('resume_based'):raise
                         if not (plan.get('communication_only') and plan.get('skip_existing_contacts')):
                             raise
                         # Quarantine this reserved contact without retrying it.
@@ -371,6 +393,8 @@ class Runner:
                 self.update(delivered=delivery_count,message='已获得平台结果回执')
                 self.store.log('已核验投递：' + job['title'])
                 self.control.wait(interval_seconds,adapter.page.wait_for_timeout)
+
+        return processed_count
 
     def _action(self, adapter, application, kind, callback):
         existing = self.store.one('SELECT * FROM actions WHERE application_id=? AND kind=?', (application['id'],kind))

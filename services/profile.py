@@ -2,13 +2,15 @@
 import re
 
 SKILLS = {
-    'Python':r'\bpython\b', 'RAG':r'\brag\b', 'AI Agent':r'\bai\s*agent\b',
+    'Python':r'\bpython\b', 'RAG':r'\brag\b|检索增强|知识库', 'AI Agent':r'\bai\s*agent\b|智能体',
     'FAISS':r'\bfaiss\b', 'Chroma':r'\bchroma\b', 'Milvus':r'\bmilvus\b',
     'OpenCV':r'\bopencv\b', 'PyTorch':r'\bpytorch\b', 'TensorFlow':r'\btensorflow\b',
     'FreeRTOS':r'\bfreertos\b', 'MQTT':r'\bmqtt\b', 'SQL':r'\bsql\b',
     'FastAPI':r'\bfastapi\b', 'Vue':r'\bvue\b', 'React':r'\breact\b',
     'Java':r'\bjava\b', 'C#':r'\bc#', 'C++':r'\bc\+\+',
     'Prompt Engineering':r'\bprompt\s+engineering\b', 'Embedding':r'\bembedding\b',
+    'LangChain':r'\blangchain\b', 'LangGraph':r'\blanggraph\b', 'MCP':r'\bmcp\b',
+    'Dify':r'\bdify\b', 'Coze':r'\bcoze\b|扣子',
 }
 
 def extract_profile(text):

@@ -86,14 +86,17 @@ class ApplicantPlatform:
         if parsed.scheme != 'https' or parsed.hostname not in self.spec['hosts']:
             raise NeedHuman('页面离开受支持的平台地址，请检查浏览器')
 
-    def goto(self, url):
+    def pace_navigation(self):
         self.checkpoint()
-        self.assert_url(url)
         previous = getattr(self, '_last_navigation', None)
         if previous is not None:
             delay = max(0, getattr(self, 'navigation_interval_seconds', 0) - (time.monotonic() - previous))
             self.control.wait(delay, self.page.wait_for_timeout)
         self._last_navigation = time.monotonic()
+
+    def goto(self, url):
+        self.assert_url(url)
+        self.pace_navigation()
         self.page.goto(url, wait_until='commit', timeout=20000)
         self.page.wait_for_timeout(1000)
 
@@ -282,16 +285,7 @@ class ApplicantPlatform:
                     if emitted >= plan['max_jobs']:
                         return
                     continue
-                self.goto(job['url'])
-                self.ensure_session(scope)
-                self.verify_job(job)
-                job['description'] = ''
-                for _ in range(15):
-                    self.checkpoint()
-                    job['description'] = self.text(self.spec['description'])
-                    if len(job['description']) >= 30:
-                        break
-                    self.page.wait_for_timeout(300)
+                job['description'] = self.read_search_description(job,scope)
                 if len(job['description']) >= 30:
                     self._search_cache[job['external_id']] = {'read_at':time.monotonic(), 'job':dict(job)}
                 yield job
@@ -300,6 +294,18 @@ class ApplicantPlatform:
                     return
             if not batch:
                 return
+
+    def read_search_description(self, job, scope):
+        self.goto(job['url'])
+        self.ensure_session(scope)
+        self.verify_job(job)
+        description=''
+        for _ in range(15):
+            self.checkpoint()
+            description=self.text(self.spec['description'])
+            if len(description)>=30:break
+            self.page.wait_for_timeout(300)
+        return description
 
     def diagnostic(self, message):
         """Screenshots may contain private data: local only, never uploaded."""

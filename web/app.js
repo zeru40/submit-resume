@@ -26,6 +26,7 @@ const app = createApp({
     const selectedPlan=ref(localStorage.getItem('selectedPlan')||''), selectedPlatforms=ref(['boss']), selectedJobs=ref([]);
     const jobQuery=ref(''), jobPlatform=ref(''), onlyEligible=ref(false), planForm=ref(null), preview=ref(null), jobDetail=ref(null),applicationDetail=ref(null);
     const messagePreview=ref(null);
+    const resumeCity=ref('厦门'),resumeCityCode=ref('101230200');
     const toast=ref(null), uploading=ref(false), saving=ref(false), reviewNotes=ref({}), completionNote=ref(''), confirmRun=ref(false);
     const platformNames={boss:'BOSS直聘',zhilian:'智联招聘'};
     const metrics=[{key:'jobs',label:'已发现岗位',icon:'search',note:'累计读取的岗位机会'},{key:'eligible',label:'符合条件',icon:'check',note:'通过最近一次方案筛选'},{key:'delivered',label:'已核验投递',icon:'briefcase',note:'完成所需动作的申请'},{key:'review',label:'需要核验',icon:'clock',note:'打开平台确认操作结果'}];
@@ -63,6 +64,8 @@ const app = createApp({
     async function savePlan(){saving.value=true;try{const plan=await api('/plans',{method:'POST',body:JSON.stringify(planForm.value)});selectedPlan.value=plan.id;localStorage.setItem('selectedPlan',plan.id);planForm.value=null;notify('求职方案已保存');await refresh();}catch(e){notify(e.message,'error');}finally{saving.value=false;}}
     function deletePlan(p){if(window.confirm(`删除方案“${p.name}”？已保存的投递记录会保留。`))act(()=>api('/plans/'+p.id,{method:'DELETE'}));}
     async function uploadResume(event){if(uploading.value)return;const file=event.target.files[0];if(!file)return;if(file.size>15*1024*1024){notify('简历不能超过15MB','error');event.target.value='';return;}uploading.value=true;const form=new FormData();form.append('file',file);try{await act(async()=>{const result=await api('/resumes',{method:'POST',body:form});preview.value=result;notify('简历已上传并自动读取，请核对解析结果');});}finally{uploading.value=false;event.target.value='';}}
+    async function prepareResumeTask(r){await act(async()=>{const strategy=await api('/resumes/'+r.id+'/strategy');preview.value={...r,strategy};});}
+    async function startResumeTask(r){await act(async()=>{const result=await api('/resumes/'+r.id+'/auto-run',{method:'POST',body:JSON.stringify({city:resumeCity.value,boss_city_code:resumeCityCode.value,max_contacts:5})});selectedPlan.value=result.plan_id;localStorage.setItem('selectedPlan',result.plan_id);preview.value=null;page.value='dashboard';notify('已按简历启动：小批搜索、匹配后打招呼；异常时整轮停止');});}
     function deleteResume(r){if(window.confirm(`删除简历“${r.name}”？`))act(()=>api('/resumes/'+r.id,{method:'DELETE'}));}
     function platform(code,operation){return act(()=>api(`/platforms/${code}/${operation}`,{method:'POST'}));}
     function control(operation){return act(()=>api('/control/'+operation,{method:'POST'}));}
@@ -78,7 +81,7 @@ const app = createApp({
     function actionName(kind){return ({upload:'准备平台附件',contact:'建立沟通会话',greeting:'发送沟通文案',resume:'发送附件简历',apply:'提交职位申请',manual_confirmation:'人工完成核验'})[kind]||kind;}
     async function reviewAction(action,sent){const note=reviewNotes.value[action.id]||'';if(note.trim().length<5){notify('请填写不少于5字的核验依据','error');return;}await act(async()=>{await api('/actions/'+action.id+'/review',{method:'POST',body:JSON.stringify({sent,note})});notify('核验结果已保存');});}
     onMounted(async()=>{await refresh();timer=setInterval(poll,2000);});onUnmounted(()=>{clearInterval(timer);clearTimeout(toastTimer);});
-    return {messagePreview,previewMessage,nav,page,recordTab,state,connected,overview,resumes,plans,jobs,applications,settings,selectedPlan,selectedPlatforms,selectedJobs,jobQuery,jobPlatform,onlyEligible,planForm,preview,jobDetail,applicationDetail,toast,saving,reviewNotes,platformNames,metrics,currentNav,activePlan,filteredRecords,today,confirmRun,refresh,statusName,formatDate,resumeName,splitTerms,recordUrl,editPlan,savePlan,deletePlan,uploadResume,deleteResume,platform,control,start,actionName,reviewAction,completionNote,completeApplication,recoverableRun,retryRun,uploading};
+    return {resumeCity,resumeCityCode,prepareResumeTask,startResumeTask,messagePreview,previewMessage,nav,page,recordTab,state,connected,overview,resumes,plans,jobs,applications,settings,selectedPlan,selectedPlatforms,selectedJobs,jobQuery,jobPlatform,onlyEligible,planForm,preview,jobDetail,applicationDetail,toast,saving,reviewNotes,platformNames,metrics,currentNav,activePlan,filteredRecords,today,confirmRun,refresh,statusName,formatDate,resumeName,splitTerms,recordUrl,editPlan,savePlan,deletePlan,uploadResume,deleteResume,platform,control,start,actionName,reviewAction,completionNote,completeApplication,recoverableRun,retryRun,uploading};
   }
 });
 app.component('icon',{props:['name'],template:'<svg class="icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path :d="path" /></svg>',computed:{path(){return icons[this.name]||icons.file;}}});

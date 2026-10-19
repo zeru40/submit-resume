@@ -118,6 +118,30 @@ def test_saved_job_description_avoids_detail_navigation_after_restart(browser,tm
     finally:b.close()
 
 
+def test_boss_reads_selected_details_inline_without_opening_legacy_pages(browser,tmp_path):
+    detail_requests=[]
+    description='负责Python后台服务、业务接口与数据库设计开发，构建Agent工具调用及企业知识库应用。'
+    def handler(route):
+        if '/job_detail/' in route.request.url:detail_requests.append(route.request.url)
+        cards=''
+        for n in (1,2):
+            cards+=f'''<div class="job-card-wrapper"><a class="job-name" href="/job_detail/job{n}.html"
+                onclick="event.preventDefault();document.querySelector('.job-detail-header .job-name').textContent='AI开发{n}';document.querySelector('.op-btn-chat').setAttribute('ka','chat_job{n}');document.querySelector('.job-sec-text').textContent='{description}'">AI开发{n}</a>
+                <span class="company-name">公司{n}</span><span class="salary">15-25K</span><span class="job-area">厦门</span></div>'''
+        route.fulfill(content_type='text/html; charset=utf-8',body=ACCOUNT+cards+'''
+            <div class="job-detail-container"><div class="job-detail-header"><span class="job-name"></span></div>
+            <a class="op-btn-chat" ka="none">立即沟通</a><div class="job-sec-text"></div></div>''')
+    a=adapter(browser,BossApplicant,tmp_path,handler)
+    try:
+        a.goto('https://www.zhipin.com/web/geek/jobs')
+        jobs=list(a.search({'keyword':'AI','boss_city_code':'101230200','max_pages':1,'max_jobs':5}))
+        assert [job['external_id'] for job in jobs]==['job1','job2']
+        assert all(job['description']==description for job in jobs)
+        assert detail_requests==[] and '/web/geek/jobs' in a.page.url
+        assert not a.external_started
+    finally:a.close()
+
+
 def test_restriction_text_takes_precedence_over_account_header(browser,tmp_path):
     def handler(route):
         route.fulfill(content_type='text/html; charset=utf-8',body=ACCOUNT+'访问受限：您的账户存在异常行为，已暂时被限制访问！')

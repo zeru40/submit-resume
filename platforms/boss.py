@@ -33,6 +33,7 @@ class BossApplicant(ApplicantPlatform):
             # Clicking the card's job area selects the inline detail. Do not use
             # the company link or a standalone legacy detail page for contact.
             self.page.wait_for_timeout(300)
+            self.pace_navigation()
             link.click()
             for _ in range(25):
                 self.checkpoint()
@@ -57,6 +58,25 @@ class BossApplicant(ApplicantPlatform):
                 raise BeforeClickError('岗位已经关闭或下线')
             return
         return super().verify_job(job)
+
+    def read_search_description(self, job, scope):
+        """Current BOSS list exposes details inline; avoid a full page per job."""
+        if urlsplit(self.page.url).path!='/web/geek/jobs' or not self.page.locator('.job-detail-container').count():
+            return super().read_search_description(job,scope)
+        link=self.page.locator('a.job-name[href="/job_detail/'+job['external_id']+'.html"]')
+        if link.count()!=1:raise BeforeClickError('未找到唯一岗位卡片，已停止搜索')
+        self.pace_navigation()
+        link.click()
+        for _ in range(25):
+            self.checkpoint()
+            action=self.page.locator('.job-detail-container .op-btn-chat')
+            if action.count()==1 and job['external_id'] in (action.get_attribute('ka') or ''):
+                self.ensure_session(scope)
+                self.verify_job(job)
+                description=self.text(self.spec['description'],self.page.locator('.job-detail-container'))
+                if len(description)>=30:return description
+            self.page.wait_for_timeout(300)
+        raise BeforeClickError('岗位内嵌详情未完成核验，已停止搜索')
 
     def peer(self):
         snapshot = self.chat_snapshot()

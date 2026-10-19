@@ -156,6 +156,7 @@ def test_contact_pacing_survives_restart_and_old_short_interval(tmp_path,monkeyp
     try:
         runner.submit(command());wait_done(runner)
     finally:runner.close()
+
     # A fresh Runner must use the persisted receipt, not an in-memory timer.
     jobs=[dict(j,external_id='job2',company='第二家公司') for j in adapter.search({})]
     other=FakeAdapter();other.search=lambda plan:iter(jobs)
@@ -167,6 +168,69 @@ def test_contact_pacing_survives_restart_and_old_short_interval(tmp_path,monkeyp
         assert other.contacts==1
         assert any(55 < seconds <= 60 for seconds in waits[:-1])
         assert waits[-1]==60
+    finally:runner.close()
+
+
+def test_resume_pipeline_caps_contacts_across_all_directions(tmp_path):
+    store=Store(tmp_path/'db.sqlite');adapter=FakeAdapter();searched=[]
+    original=list(adapter.search({}))[0]
+    def search(plan):
+        searched.append(plan['keyword'])
+        for i in range(2):
+            yield dict(original,external_id=f'{len(searched)}-{i}',company=f'公司{len(searched)}-{i}',
+                title='Python全栈开发',description='负责Python全栈与后端系统开发，包括前端页面、后端接口、数据库设计及业务需求实现。')
+    adapter.search=search;adapter.greet=lambda message,*args:{'message':message}
+    adapter.existing_companies=lambda scope:set();adapter.already_contacted=lambda:False
+    cmd=command();cmd['search_keywords']=['Python后端开发','Java开发','前端开发']
+    cmd['plan'].update(max_deliveries=5,resume_based=True,skip_existing_contacts=True,
+        communication_only=True,personalized_greeting=True,greeting_style='job_interest')
+    runner=Runner(store,tmp_path,factory=lambda *args:adapter)
+    try:
+        runner.submit(cmd);wait_done(runner)
+        assert runner.snapshot()['state']=='completed'
+        assert len(searched)==3 and adapter.contacts==5
+        assert runner.snapshot()['messaged']==5
+        import json
+        persisted=json.loads(store.one('SELECT body FROM runs')['body'])
+        assert persisted['search_keywords']==cmd['search_keywords']
+        assert persisted['account_scopes']=={'boss':'scope1'}
+    finally:runner.close()
+
+
+def test_resume_pipeline_stops_all_directions_on_session_or_page_error(tmp_path):
+    store=Store(tmp_path/'db.sqlite');adapter=FakeAdapter();searched=[]
+    def search(plan):
+        searched.append(plan['keyword'])
+        raise NeedHuman('平台限制或页面异常')
+        yield
+    adapter.search=search;adapter.existing_companies=lambda scope:set()
+    cmd=command();cmd['search_keywords']=['AI Agent','大模型应用开发','Python后端开发']
+    cmd['plan'].update(resume_based=True,skip_existing_contacts=True)
+    runner=Runner(store,tmp_path,factory=lambda *args:adapter)
+    try:
+        runner.submit(cmd);wait_done(runner)
+        assert runner.snapshot()['state']=='needs_human'
+        assert searched==['AI Agent'] and adapter.contacts==0
+    finally:runner.close()
+
+
+def test_resume_pipeline_stops_after_unconfirmed_contact_even_if_account_ready(tmp_path):
+    store=Store(tmp_path/'db.sqlite');adapter=FakeAdapter();original=list(adapter.search({}))[0]
+    adapter.search=lambda plan:iter([original,dict(original,external_id='job2',company='另一家公司')])
+    adapter.existing_companies=lambda scope:set();adapter.already_contacted=lambda:False
+    def uncertain(*args):
+        adapter.contacts+=1;adapter.external_started=True
+        raise NeedHuman('沟通结果未核验')
+    adapter.contact=uncertain
+    cmd=command();cmd['search_keywords']=['Python后端开发','Java开发']
+    cmd['plan'].update(resume_based=True,skip_existing_contacts=True,
+        communication_only=True,personalized_greeting=True,greeting_style='job_interest')
+    runner=Runner(store,tmp_path,factory=lambda *args:adapter)
+    try:
+        runner.submit(cmd);wait_done(runner)
+        assert runner.snapshot()['state']=='needs_human' and adapter.contacts==1
+        assert store.one("SELECT status FROM actions WHERE kind='contact'")['status']=='unknown'
+        assert not store.one("SELECT id FROM applications WHERE job_id='boss:job2'")
     finally:runner.close()
 
 
