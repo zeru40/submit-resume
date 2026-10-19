@@ -21,6 +21,20 @@ class BossApplicant(ApplicantPlatform):
     def __init__(self, *args, **kwargs):
         super().__init__('boss', *args, **kwargs)
 
+    def select_search_card(self, job):
+        href='/job_detail/'+job['external_id']+'.html'
+        link=self.page.locator('a.job-name[href="'+href+'"]')
+        if link.count()!=1:raise BeforeClickError('未找到唯一岗位标题，未选择岗位')
+        # Current BOSS binds inline selection to the card, while its title link
+        # can consume clicks without changing the selected detail.
+        for wrapper in ('.job-card-box','.job-card-wrapper'):
+            card=self.page.locator(wrapper+':has(a.job-name[href="'+href+'"])')
+            if card.count()==1:
+                card.click()
+                return
+            if card.count()>1:raise BeforeClickError('岗位卡片不唯一，未选择岗位')
+        link.click() # Legacy layout without card containers.
+
     def navigate_job(self, job, plan):
         """Select the real SPA list card before using its right-hand action."""
         # Results can reorder after each chat. Company search also narrows the
@@ -55,7 +69,7 @@ class BossApplicant(ApplicantPlatform):
             # the company link or a standalone legacy detail page for contact.
             self.page.wait_for_timeout(300)
             self.pace_navigation()
-            link.click()
+            self.select_search_card(job)
             for _ in range(25):
                 self.checkpoint()
                 action=self.page.locator('.job-detail-container .op-btn-chat')
@@ -89,7 +103,7 @@ class BossApplicant(ApplicantPlatform):
         link=self.page.locator('a.job-name[href="/job_detail/'+job['external_id']+'.html"]')
         if link.count()!=1:raise BeforeClickError('未找到唯一岗位卡片，已停止搜索')
         self.pace_navigation()
-        link.click()
+        self.select_search_card(job)
         for _ in range(25):
             self.checkpoint()
             action=self.page.locator('.job-detail-container .op-btn-chat')

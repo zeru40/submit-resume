@@ -34,7 +34,7 @@ def adapter(browser, cls, tmp_path, handler):
     code='boss' if cls is BossApplicant else 'zhilian'
     obj.code,obj.spec=code,SPECS[code]
     obj.context,obj.page=context,context.new_page()
-    obj.page.set_default_timeout(1000)
+    obj.page.set_default_timeout(5000)
     obj.data_dir=obj.profile=tmp_path
     obj.control=Control()
     obj.publish=lambda *args:None
@@ -302,6 +302,30 @@ def test_spa_card_selection_binds_contact_action_to_job(browser,tmp_path):
         assert not a.external_started
         with pytest.raises(NeedHuman,match='不一致'):
             a.verify_job({'external_id':'job2','title':'AI开发'})
+    finally:a.close()
+
+
+@pytest.mark.parametrize('read_description',[False,True])
+def test_inline_selection_clicks_card_instead_of_inert_title(browser,tmp_path,monkeypatch,read_description):
+    def handler(route):
+        route.fulfill(content_type='text/html; charset=utf-8',body=ACCOUNT+'''
+            <script>window.titleClicks=0;window.cardClicks=0</script>
+            <div class="job-card-box" style="width:300px;height:140px" onclick="window.cardClicks++;document.querySelector('.op-btn-chat').setAttribute('ka','cpc_job_list_chat_job1');document.querySelector('.job-detail-header .job-name').textContent='AI开发'">
+              <a class="job-name" href="/job_detail/job1.html" onclick="event.preventDefault();event.stopPropagation();window.titleClicks++">AI开发</a>
+            </div>
+            <div class="job-detail-container"><div class="job-detail-header"><span class="job-name">旧岗位</span></div>
+            <a class="op-btn-chat" ka="old-job">立即沟通</a>
+            <div class="job-sec-text">负责AI智能体应用设计、Python接口开发、RAG知识库搭建及业务系统集成与测试。</div></div>''')
+    a=adapter(browser,BossApplicant,tmp_path,handler)
+    monkeypatch.setattr(a.page,'wait_for_timeout',lambda ms:None)
+    try:
+        a.goto('https://www.zhipin.com/web/geek/jobs');scope=a.ensure_session()
+        job={'external_id':'job1','title':'AI开发','company':'测试公司'}
+        if read_description:assert 'Python' in a.read_search_description(job,scope)
+        else:a.navigate_job(job,{'keyword':'AI','boss_city_code':'101230200'})
+        a.verify_job(job)
+        assert a.page.evaluate('window.cardClicks')==1 and a.page.evaluate('window.titleClicks')==0
+        assert not a.external_started
     finally:a.close()
 
 

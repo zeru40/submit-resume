@@ -13,7 +13,7 @@ def build(source,found=True,valid=True):
     page=SimpleNamespace(url='https://www.zhipin.com/web/geek/chat',wait_for_timeout=lambda _:None)
     class Locator:
         def __init__(self,selector):self.selector=selector
-        def count(self):return int(found and page.url==source)
+        def count(self):return int(found and page.url==source and self.selector.startswith(('a.job-name','.job-detail-container')))
         def click(self):clicks.append(page.url)
         def get_attribute(self,name):return 'cpc_job_list_chat_job1' if valid else 'other-job'
         def evaluate(self,*args):return False

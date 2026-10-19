@@ -235,8 +235,13 @@ class ApplicantPlatform:
             self.goto(url)
             self.ensure_session(scope)
             cards = None
-            for _ in range(15):
+            deadline=time.monotonic()+20
+            session_check=time.monotonic()+2
+            while time.monotonic()<deadline:
                 self.checkpoint()
+                if time.monotonic()>=session_check:
+                    self.ensure_session(scope)
+                    session_check=time.monotonic()+2
                 for selector in self.spec['cards']:
                     loc = self.page.locator(selector)
                     if loc.count():
@@ -246,7 +251,7 @@ class ApplicantPlatform:
                     break
                 self.page.wait_for_timeout(400)
             if cards is None:
-                raise NeedHuman('没有识别到岗位列表，请检查搜索条件、登录状态或页面选择器')
+                raise NeedHuman('等待20秒仍未识别到岗位列表，已停止；请检查搜索条件、网络或页面适配')
             batch = []
             for i in range(min(cards.count(), 100)):
                 self.checkpoint()
