@@ -329,6 +329,31 @@ def test_inline_selection_clicks_card_instead_of_inert_title(browser,tmp_path,mo
     finally:a.close()
 
 
+@pytest.mark.parametrize('first_is_protected',[False,True])
+def test_infinite_search_loads_next_batch_without_page_parameter_reload(browser,tmp_path,first_is_protected):
+    visits=[]
+    def handler(route):
+        visits.append(route.request.url)
+        route.fulfill(content_type='text/html; charset=utf-8',body=ACCOUNT+'''
+          <div style="height:1800px"></div><div id="list"><div class="job-card-box">
+          <a class="job-name" href="/job_detail/job1.html">Python工程师</a><span class="company-name">测试公司</span>
+          <span class="job-area">厦门</span></div></div>
+          <script>let added=false;addEventListener('scroll',()=>{if(!added){added=true;const d=document.createElement('div');d.className='job-card-box';d.innerHTML='<a class="job-name" href="/job_detail/job2.html">Python工程师</a><span class="company-name">测试公司</span><span class="job-area">厦门</span>';document.querySelector('#list').append(d);}})</script>''')
+    a=adapter(browser,BossApplicant,tmp_path,handler)
+    description='负责Python接口开发、AI智能体集成、知识库应用设计以及业务流程测试与维护。'
+    known={f'boss:job{i}':{'title':'Python工程师','company':'测试公司','description':description} for i in (1,2)}
+    try:
+        a.goto('https://www.zhipin.com/web/geek/jobs');visits.clear()
+        jobs=list(a.search({'keyword':'Python','boss_city_code':'101230200','max_pages':2,'max_jobs':10,
+            '_known_jobs':known,'_skip_job_ids':{'boss:job1'} if first_is_protected else set()}))
+        assert [j['external_id'] for j in jobs]==(['job2'] if first_is_protected else ['job1','job2'])
+        assert jobs[-1]['source_batch']==2
+        assert len(visits)==1 and 'page=1' in visits[0]
+        assert all(j['source_url']==visits[0] for j in jobs)
+        assert not a.external_started
+    finally:a.close()
+
+
 @pytest.mark.parametrize('has_prior_message',[False,True])
 def test_contact_verifies_message_center_without_reclick(browser,tmp_path,monkeypatch,has_prior_message):
     def handler(route):

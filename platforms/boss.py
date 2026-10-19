@@ -35,6 +35,30 @@ class BossApplicant(ApplicantPlatform):
             if card.count()>1:raise BeforeClickError('岗位卡片不唯一，未选择岗位')
         link.click() # Legacy layout without card containers.
 
+    def advance_search_results(self, scope, known_ids=None):
+        """Load one more visible result batch without resetting an infinite list."""
+        selector='a.job-name[href*="/job_detail/"]'
+        links=self.page.locator(selector)
+        count=links.count()
+        if not count:return False
+        before=set(self.page.evaluate("()=>[...document.querySelectorAll('a.job-name[href*=\"/job_detail/\"]')].map(e=>e.getAttribute('href'))"))
+        if known_ids is not None and any(self.detail_id(href) not in known_ids for href in before):
+            return True
+        self.pace_navigation()
+        self.page.bring_to_front()
+        links.nth(count-1).evaluate("e=>{(e.closest('.job-card-box')||e).scrollIntoView({block:'end',behavior:'instant'});window.scrollBy({top:Math.max(400,innerHeight*.75),behavior:'instant'});return true;}")
+        deadline=time.monotonic()+20
+        session_check=time.monotonic()+2
+        while time.monotonic()<deadline:
+            self.checkpoint()
+            if time.monotonic()>=session_check:
+                self.ensure_session(scope)
+                session_check=time.monotonic()+2
+            current=set(self.page.evaluate("()=>[...document.querySelectorAll('a.job-name[href*=\"/job_detail/\"]')].map(e=>e.getAttribute('href'))"))
+            if current-before:return True
+            self.page.wait_for_timeout(400)
+        return False
+
     def navigate_job(self, job, plan):
         """Select the real SPA list card before using its right-hand action."""
         # Results can reorder after each chat. Company search also narrows the
@@ -63,6 +87,10 @@ class BossApplicant(ApplicantPlatform):
                 self.checkpoint()
                 if link.count() and self.page.locator('.job-detail-container .op-btn-chat').count():break
                 self.page.wait_for_timeout(250)
+            if url==source and link.count()!=1:
+                for _ in range(min(max(int(job.get('source_batch',1))-1,0),9)):
+                    if not self.advance_search_results(self.scope):break
+                    if link.count()==1:break
             if link.count()!=1:
                 continue
             # Clicking the card's job area selects the inline detail. Do not use

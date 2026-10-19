@@ -231,8 +231,12 @@ class ApplicantPlatform:
         seen = set()
         emitted = 0
         for page_num in range(1, plan['max_pages'] + 1):
-            url = self.spec['search'].format(keyword=quote(plan['keyword']), city_code=quote(plan[f'{self.code}_city_code']), page=page_num)
-            self.goto(url)
+            advance=getattr(self,'advance_search_results',None)
+            if page_num>1 and callable(advance):
+                if not advance(scope,seen):return
+            else:
+                url = self.spec['search'].format(keyword=quote(plan['keyword']), city_code=quote(plan[f'{self.code}_city_code']), page=page_num)
+                self.goto(url)
             self.ensure_session(scope)
             cards = None
             deadline=time.monotonic()+20
@@ -269,6 +273,7 @@ class ApplicantPlatform:
                 seen.add(ident)
                 job = {'platform':self.code, 'external_id':ident, 'url':href,
                     'source_url':self.page.url,
+                    'source_batch':page_num,
                     'search_keyword':plan['keyword'],
                     'title':self.text(self.spec['title'], card) or link.inner_text().strip(),
                     'company':self.text(self.spec['company'], card),
@@ -305,7 +310,7 @@ class ApplicantPlatform:
                 emitted += 1
                 if emitted >= plan['max_jobs']:
                     return
-            if not batch:
+            if not batch and not callable(advance):
                 return
 
     def read_search_description(self, job, scope):

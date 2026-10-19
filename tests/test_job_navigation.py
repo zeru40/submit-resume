@@ -47,3 +47,18 @@ def test_present_card_with_wrong_detail_still_stops():
         adapter.navigate_job(job,{'boss_city_code':'101230200'})
     assert not isinstance(exc.value,JobUnavailable)
     assert visited==clicks==[source]
+
+
+def test_restores_recorded_scroll_batch_before_declaring_absence():
+    source='https://www.zhipin.com/web/geek/jobs?query=AI&city=101230200&page=1'
+    adapter,job,visited,clicks=build(source);job['source_batch']=2
+    original=adapter.page.locator;loaded=[False]
+    def locator(selector):
+        item=original(selector);count=item.count
+        item.count=lambda:count() if loaded[0] else 0
+        return item
+    adapter.page.locator=locator
+    def advance(scope):loaded[0]=True;return True
+    adapter.advance_search_results=advance
+    adapter.navigate_job(job,{'boss_city_code':'101230200'})
+    assert loaded[0] and visited==clicks==[source]
