@@ -27,7 +27,7 @@ class BossApplicant(ApplicantPlatform):
         if link.count()!=1:raise BeforeClickError('未找到唯一岗位标题，未选择岗位')
         # Current BOSS binds inline selection to the card, while its title link
         # can consume clicks without changing the selected detail.
-        for wrapper in ('.job-card-box','.job-card-wrapper'):
+        for wrapper in ('.job-card-box',):
             card=self.page.locator(wrapper+':has(a.job-name[href="'+href+'"])')
             if card.count()==1:
                 card.click()

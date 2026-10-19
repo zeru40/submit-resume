@@ -115,6 +115,7 @@ class CdpPage:
         if expression.startswith(('() =>','()=>','function')):expression='('+expression+')()'
         return self.client.evaluate(expression)
     def goto(self,url,wait_until='commit',timeout=20000):
+        self.bring_to_front()
         try:previous=self.evaluate('performance.timeOrigin')
         except Exception:previous=None
         result=self.client.call('Page.navigate',{'url':url})
@@ -127,7 +128,16 @@ class CdpPage:
             except Exception:pass
             time.sleep(.15)
         raise RuntimeError('页面加载超时，请检查网络或在浏览器查看提示')
-    def bring_to_front(self):self.client.call('Page.bringToFront')
+    def bring_to_front(self):
+        window=self.context.browser_client.call('Browser.getWindowForTarget',{'targetId':self.ident})
+        if window.get('bounds',{}).get('windowState')=='minimized':
+            self.context.browser_client.call('Browser.setWindowBounds',
+                {'windowId':window['windowId'],'bounds':{'windowState':'normal'}})
+        self.client.call('Page.bringToFront')
+        for _ in range(20):
+            if self.evaluate('document.visibilityState')=='visible':return
+            self.wait_for_timeout(100)
+        raise RuntimeError('平台浏览器仍不可见，未继续页面输入；请恢复项目的 Edge 窗口')
     def close(self):
         self.context.browser_client.call('Target.closeTarget',{'targetId':self.ident})
         self.client.close()

@@ -47,3 +47,31 @@ def test_repeated_reads_do_not_reload_document(context):
     for _ in range(5):
         assert page.locator('.card').count()==1
         assert page.evaluate('performance.timeOrigin')==first
+
+
+def test_minimized_window_is_restored_before_page_input():
+    from types import SimpleNamespace
+    from core.cdp_page import CdpPage
+    calls=[];restored=[False]
+    def browser_call(method,params):
+        calls.append(method)
+        if method=='Browser.getWindowForTarget':return {'windowId':12,'bounds':{'windowState':'minimized'}}
+        assert params=={'windowId':12,'bounds':{'windowState':'normal'}}
+        restored[0]=True
+    page=object.__new__(CdpPage);page.ident='task'
+    page.context=SimpleNamespace(browser_client=SimpleNamespace(call=browser_call))
+    page.client=SimpleNamespace(call=lambda method:calls.append(method))
+    page.evaluate=lambda _: 'visible' if restored[0] else 'hidden'
+    page.bring_to_front()
+    assert calls==['Browser.getWindowForTarget','Browser.setWindowBounds','Page.bringToFront']
+
+
+def test_hidden_page_refuses_input_instead_of_silent_click():
+    from types import SimpleNamespace
+    from core.cdp_page import CdpPage
+    calls=[];page=object.__new__(CdpPage);page.ident='task'
+    page.context=SimpleNamespace(browser_client=SimpleNamespace(call=lambda *args:{'windowId':12,'bounds':{'windowState':'normal'}}))
+    page.client=SimpleNamespace(call=lambda method:calls.append(method))
+    page.evaluate=lambda _:'hidden';page.wait_for_timeout=lambda _:None
+    with pytest.raises(RuntimeError,match='不可见'):page.bring_to_front()
+    assert calls==['Page.bringToFront']
