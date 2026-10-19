@@ -339,3 +339,18 @@ def test_unavailable_job_skips_without_contact_and_next_job_can_send(tmp_path):
         assert app['status']=='unavailable'
         assert not store.one('SELECT id FROM actions WHERE application_id=?',(app['id'],))
     finally:runner.close()
+
+
+def test_manual_review_avoids_title_filter_but_preserves_city_gate(tmp_path):
+    store=Store(tmp_path/'db.sqlite');runner=Runner(store,tmp_path,factory=lambda *args:FakeAdapter())
+    runner.ai_matcher.evaluate=lambda *args:(_ for _ in ()).throw(AssertionError('不得调用模型'))
+    job={'title':'AI产品经理技术研发','description':'负责内容电商智能体搭建、接口集成、提示词与工作流开发，并编写交付文档。',
+         'location':'厦门','_manual_reviewed':True,'ai_assessment':{'score':99}}
+    plan={'matching_mode':'rules','resume_based':True,'keyword':'AI Agent','min_score':100,'city':'厦门'}
+    try:
+        _,reasons,allowed=runner._assess(job,plan,'Python')
+        assert allowed and '人工审核' in reasons[0]
+        assert '_manual_reviewed' not in job and 'ai_assessment' not in job
+        job.update(location='上海',_manual_reviewed=True)
+        assert not runner._assess(job,plan,'Python')[2]
+    finally:runner.close()

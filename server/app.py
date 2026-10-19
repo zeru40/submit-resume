@@ -62,6 +62,7 @@ class RunBody(BaseModel):
     mode: str = Field(pattern=r'^(search|auto)$')
     platforms: list[str] = Field(min_length=1,max_length=2)
     job_ids: list[str] = Field(default_factory=list,max_length=100)
+    manually_reviewed_job_ids: list[str] = Field(default_factory=list,max_length=100)
 
 class WorkspaceBody(BaseModel):
     model_config = ConfigDict(extra='forbid')
@@ -295,6 +296,11 @@ def create_app(data_dir=None, runner_factory=Runner):
         if not row:
             raise ValueError('请先保存求职方案')
         plan = Plan.model_validate(json.loads(row['body'])).model_dump()
+        if body.manually_reviewed_job_ids:
+            if (body.mode!='auto' or plan['matching_mode']!='rules'
+                    or not set(body.manually_reviewed_job_ids)<=set(body.job_ids)
+                    or len(set(body.manually_reviewed_job_ids))!=len(body.manually_reviewed_job_ids)):
+                raise ValueError('人工审核只适用于本地规则模式下明确选中的岗位')
         if plan.get('matching_mode')=='ai':configured(store)
         resume = store.one('SELECT * FROM resumes WHERE id=?',(plan['resume_id'],)) if plan['resume_id'] else None
         if plan.get('matching_mode')=='ai' and not resume:raise ValueError('大模型匹配前请先选择简历')
@@ -309,6 +315,7 @@ def create_app(data_dir=None, runner_factory=Runner):
                 raise ValueError('选中岗位不存在或不属于当前平台')
         runner.submit({'type':'run','mode':body.mode,'plan':plan,'resume':resume,
                        'platforms':body.platforms,'job_ids':body.job_ids,
+                       'manually_reviewed_job_ids':body.manually_reviewed_job_ids,
                        'search_keywords':plan.get('search_keywords',[]) if plan.get('resume_based') and not body.job_ids else []})
         store.log('启动任务：' + plan['name'] + (' · 仅搜索' if body.mode=='search' else ' · 自动投递'))
         return {'ok':True}

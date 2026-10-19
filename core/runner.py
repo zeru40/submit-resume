@@ -235,6 +235,10 @@ class Runner:
 
     def _assess(self, job, plan, resume_text):
         job.pop('ai_assessment',None)
+        if job.pop('_manual_reviewed',False):
+            gate=dict(plan,resume_based=False,skills='',min_score=0)
+            score,reasons,eligible=match_job(job,gate,resume_text)
+            return score,['岗位方向已人工审核；仍核验城市、薪资、排除条件与详情完整性']+reasons,eligible
         if plan.get('matching_mode')!='ai':return match_job(job,plan,resume_text)
         # Keep explicit city/salary/exclusion gates, let the model judge semantic
         # relevance rather than silently substituting a local keyword score.
@@ -275,7 +279,9 @@ class Runner:
                 for ident in command['job_ids']:
                     row = self.store.one('SELECT * FROM jobs WHERE id=? AND platform=?', (ident, code))
                     if row:
-                        jobs.append(json.loads(row['body']))
+                        job=json.loads(row['body'])
+                        if ident in command.get('manually_reviewed_job_ids',[]):job['_manual_reviewed']=True
+                        jobs.append(job)
             else:
                 # Materialize discovery before applying: applying navigates away from the list.
                 jobs = []

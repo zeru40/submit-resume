@@ -29,6 +29,21 @@ def test_opens_directly_without_login(client):
     assert client.get('/api/overview').json()['jobs']==0
 
 
+def test_manual_review_requires_explicit_local_selected_job(client):
+    resume=client.post('/api/resumes',files={'file':('cv.txt',b'Python RAG projects','text/plain')}).json()
+    p=plan(client,resume_id=resume['id'],matching_mode='rules')
+    job_id=client.app.state.store.upsert_job({'platform':'boss','external_id':'reviewed',
+        'title':'Coze工作流工程师','company':'测试公司','location':'厦门',
+        'description':'负责业务工作流编排、接口集成、验收交付和文档编写，持续优化工作流稳定性。'},0,[],False)
+    body={'plan_id':p['id'],'mode':'auto','platforms':['boss'],'job_ids':[job_id],
+          'manually_reviewed_job_ids':[job_id]}
+    assert client.post('/api/runs',json={**body,'job_ids':[]}).status_code==400
+    assert client.post('/api/runs',json={**body,'mode':'search'}).status_code==400
+    assert client.post('/api/runs',json={**body,'manually_reviewed_job_ids':[job_id,job_id]}).status_code==400
+    assert client.post('/api/runs',json=body).status_code==200
+    assert client.app.state.runner.commands[-1]['manually_reviewed_job_ids']==[job_id]
+
+
 def test_new_plan_defaults_to_small_batch_and_history_deduplication(client):
     p=plan(client)
     assert p['max_jobs']==10 and p['max_pages']==1
