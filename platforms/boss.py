@@ -4,7 +4,7 @@ import json
 import hashlib
 from urllib.parse import quote
 from core.control import NeedHuman
-from platforms.base import ApplicantPlatform, BeforeClickError
+from platforms.base import ApplicantPlatform, BeforeClickError, JobUnavailable
 
 class WaitingReply(BeforeClickError):
     """The platform requires a reply before enabling attachment delivery."""
@@ -18,11 +18,25 @@ class BossApplicant(ApplicantPlatform):
         """Select the real SPA list card before using its right-hand action."""
         # Results can reorder after each chat. Company search also narrows the
         # visible list, while the exact public job ID still binds the target.
-        keywords=list(dict.fromkeys(value for value in
-            [job['title'],job.get('company'),job.get('search_keyword'),plan['keyword']] if value))
-        for keyword in keywords:
-            url=self.spec['search'].format(keyword=quote(keyword),city_code=plan['boss_city_code'],page=1)
-            self.goto(url)
+        urls=[]
+        source=job.get('source_url','')
+        if source:
+            self.assert_url(source)
+            parsed=urlsplit(source)
+            if parsed.path=='/web/geek/jobs' and parse_qs(parsed.query).get('city')==[plan['boss_city_code']]:
+                urls.append(source)
+        # A cached role can move between result pages. Try its recorded page,
+        # then bounded exact-title/company searches; absence is not a send error.
+        for keyword in dict.fromkeys([job['title'],job.get('company')]):
+            if keyword:
+                urls.append(self.spec['search'].format(keyword=quote(keyword),city_code=plan['boss_city_code'],page=1))
+        urls=list(dict.fromkeys(urls))
+        current=self.page.url
+        if urlsplit(current).path=='/web/geek/jobs' and self.page.locator('a.job-name[href="/job_detail/'+job['external_id']+'.html"]').count()==1:
+            urls.insert(0,current)
+        for url in dict.fromkeys(urls):
+            if self.page.url!=url:self.goto(url)
+            self.ensure_session(self.scope or None)
             link=self.page.locator('a.job-name[href="/job_detail/'+job['external_id']+'.html"]')
             for _ in range(20):
                 self.checkpoint()
@@ -43,7 +57,9 @@ class BossApplicant(ApplicantPlatform):
                     if not action.evaluate("e=>e.matches('.is-disabled,.disabled,[aria-disabled=\"true\"]')"):
                         return
                 self.page.wait_for_timeout(250)
-        raise BeforeClickError('未在当前搜索列表定位到该岗位，未发起沟通')
+            # A present card with a mismatched detail is uncertain, not absent.
+            raise BeforeClickError('岗位卡片存在，但详情身份未完成核验，已停止')
+        raise JobUnavailable('限定搜索范围内未定位到该岗位，未发起沟通，已标记跳过')
 
     def verify_job(self, job):
         if urlsplit(self.page.url).path=='/web/geek/jobs':
@@ -55,7 +71,7 @@ class BossApplicant(ApplicantPlatform):
                 raise BeforeClickError('列表中选中的岗位与目标不一致')
             body=self.page.locator('.job-detail-container').inner_text()
             if any(word in body for word in self.spec['blocked']):
-                raise BeforeClickError('岗位已经关闭或下线')
+                raise JobUnavailable('岗位已经关闭或下线')
             return
         return super().verify_job(job)
 

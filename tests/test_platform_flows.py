@@ -92,6 +92,21 @@ def test_protected_cards_do_not_open_detail_pages(browser,tmp_path,guard):
     finally:a.close()
 
 
+def test_anonymous_company_is_skipped_before_detail_when_deduplicating(browser,tmp_path):
+    details=[]
+    def handler(route):
+        if '/job_detail/' in route.request.url:details.append(route.request.url)
+        route.fulfill(content_type='text/html; charset=utf-8',body=ACCOUNT+'''<div class="job-card-wrapper">
+            <a href="/job_detail/job1.html"><span class="job-name">AI应用工程师</span></a>
+            <span class="company-name">某大型科技公司</span><span class="job-area">厦门</span></div>''')
+    a=adapter(browser,BossApplicant,tmp_path,handler)
+    try:
+        a.goto('https://www.zhipin.com/web/geek/jobs')
+        plan={'keyword':'AI','boss_city_code':'101230200','max_pages':1,'max_jobs':10,'skip_existing_contacts':True}
+        assert list(a.search(plan))==[] and not details
+    finally:a.close()
+
+
 def test_saved_job_description_avoids_detail_navigation_after_restart(browser,tmp_path):
     details=[]
     def handler(route):

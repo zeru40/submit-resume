@@ -9,7 +9,7 @@ from datetime import datetime
 
 from core.control import Control, Stopped, NeedHuman
 from core.store import dumps, now
-from platforms.base import BeforeClickError
+from platforms.base import BeforeClickError, JobUnavailable
 from platforms.boss import WaitingReply
 from services.matching import match_job
 
@@ -343,6 +343,10 @@ class Runner:
                     if navigator:
                         try:
                             navigator(job,plan)
+                        except JobUnavailable as exc:
+                            self.store.application_status(application['id'],'unavailable')
+                            self.store.log('跳过未发起沟通的失效岗位：'+job['company']+' · '+str(exc),'warning')
+                            continue
                         except BeforeClickError as exc:
                             self.store.application_status(application['id'],'unavailable')
                             self.store.log('跳过暂时无法定位的岗位：'+job['company']+' · '+str(exc),'warning')

@@ -11,6 +11,9 @@ from platforms.specs import SPECS
 class BeforeClickError(NeedHuman):
     """No external action has happened; safe to mark this attempt failed."""
 
+class JobUnavailable(BeforeClickError):
+    """A bounded public search could not locate a job; no contact was attempted."""
+
 class ApplicantPlatform:
     def __init__(self, code, playwright, data_dir, control, status, log):
         self.code, self.spec = code, SPECS[code]
@@ -260,12 +263,17 @@ class ApplicantPlatform:
                 self.assert_url(href)
                 seen.add(ident)
                 job = {'platform':self.code, 'external_id':ident, 'url':href,
+                    'source_url':self.page.url,
                     'search_keyword':plan['keyword'],
                     'title':self.text(self.spec['title'], card) or link.inner_text().strip(),
                     'company':self.text(self.spec['company'], card),
                     'salary':self.text(self.spec['salary'], card), 'location':self.text(self.spec['location'], card)}
                 if (f'{self.code}:{ident}' in plan.get('_skip_job_ids', ())
                         or job['company'] in plan.get('_skip_companies', ())):
+                    continue
+                if self.code=='boss' and plan.get('skip_existing_contacts') and (
+                        not job['company'] or re.search(r'某|\.{3}|…',job['company'])):
+                    # Anonymous/truncated companies cannot be deduplicated safely.
                     continue
                 batch.append(job)
             for job in batch:

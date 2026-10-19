@@ -35,8 +35,8 @@ class Plan(BaseModel):
     min_score: int = Field(default=60,ge=0,le=100)
     max_pages: int = Field(default=1,ge=1,le=10)
     max_jobs: int = Field(default=10,ge=1,le=100)
-    max_deliveries: int = Field(default=5,ge=1,le=50)
-    max_greetings: int = Field(default=5,ge=1,le=50)
+    max_deliveries: int = Field(default=5,ge=1,le=120)
+    max_greetings: int = Field(default=5,ge=1,le=120)
     interval_seconds: int = Field(default=60,ge=10,le=3600)
     resume_id: str = ''
     greeting: str = Field(default='',max_length=500)
@@ -53,7 +53,7 @@ class ResumeRunBody(BaseModel):
     model_config = ConfigDict(extra='forbid')
     city: str = Field(default='厦门',min_length=1,max_length=40)
     boss_city_code: str = Field(default='101230200',pattern=r'^\d{3,12}$')
-    max_contacts: int = Field(default=5,ge=1,le=50)
+    max_contacts: int = Field(default=5,ge=1,le=120)
     matching_mode: str=Field(default='ai',pattern=r'^(rules|ai)$')
 
 class RunBody(BaseModel):
@@ -197,7 +197,7 @@ def create_app(data_dir=None, runner_factory=Runner):
         plan=Plan(name='简历自动求职 · '+resume['name'][:50],keyword=strategy['keywords'][0],
             city=body.city,boss_city_code=body.boss_city_code,resume_id=ident,
             skills=','.join(strategy['skills']),min_score=ai['min_score'] if ai else 40,
-            max_pages=min(10,(body.max_contacts+29)//30),max_jobs=body.max_contacts,
+            max_pages=min(10,(body.max_contacts+29)//30),max_jobs=min(100,body.max_contacts),
             max_deliveries=body.max_contacts,max_greetings=body.max_contacts,interval_seconds=60,communication_only=True,
             personalized_greeting=True,greeting_style='job_interest',skip_existing_contacts=True,resume_based=True,
             search_keywords=strategy['keywords'],matching_mode=body.matching_mode)

@@ -33,7 +33,7 @@ def test_workspace_api_and_greeting_validation(client,tmp_path,monkeypatch):
     response=client.put('/api/settings/workspace',json={'data_dir':str(tmp_path/'new')})
     assert response.status_code==200 and response.json()['restart_required']
     assert client.get('/api/settings').json()['next_data_dir']==str(tmp_path/'new')
-    for value in (0,51):
+    for value in (0,121):
         assert client.post('/api/plans',json={'name':'test','keyword':'Python','max_greetings':value}).status_code==422
     client.app.state.runner.snapshot=lambda:{'busy':True}
     assert client.put('/api/settings/workspace',json={'data_dir':str(tmp_path/'other')}).status_code==400

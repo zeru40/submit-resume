@@ -318,3 +318,24 @@ def test_successful_greeting_target_across_keywords(tmp_path,target):
         assert runner.snapshot()['state']=='completed'
         assert runner.snapshot()['messaged']==len(sent)==adapter.contacts==target
     finally:runner.close()
+
+
+def test_unavailable_job_skips_without_contact_and_next_job_can_send(tmp_path):
+    from platforms.base import JobUnavailable
+    store=Store(tmp_path/'db.sqlite');adapter=FakeAdapter();sent=[]
+    job=list(adapter.search({}))[0]
+    adapter.search=lambda plan:iter([job,dict(job,external_id='available',company='可定位公司')])
+    def navigate(job,plan):
+        if job['external_id']=='job1':raise JobUnavailable('限定范围未找到，未发起沟通')
+    adapter.navigate_job=navigate
+    adapter.greet=lambda message,*args:sent.append(message) or {'message':message}
+    cmd=command();cmd['plan'].update(resume_based=True,keyword='Python后端开发',communication_only=True,greeting='针对岗位的招呼')
+    runner=Runner(store,tmp_path,factory=lambda *args:adapter)
+    try:
+        runner.submit(cmd);wait_done(runner)
+        assert runner.snapshot()['state']=='completed'
+        assert adapter.contacts==len(sent)==1
+        app=store.one("SELECT id,status FROM applications WHERE job_id='boss:job1'")
+        assert app['status']=='unavailable'
+        assert not store.one('SELECT id FROM actions WHERE application_id=?',(app['id'],))
+    finally:runner.close()

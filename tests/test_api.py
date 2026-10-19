@@ -54,7 +54,10 @@ def test_resume_upload_generates_strategy_and_one_bounded_pipeline(client):
     again=client.post('/api/runs',json={'plan_id':saved_plan['id'],'mode':'auto','platforms':['boss']})
     assert again.status_code==200
     assert client.app.state.runner.commands[-1]['search_keywords']==resume['strategy']['keywords']
-    assert client.post('/api/resumes/'+resume['id']+'/auto-run',json={'max_contacts':99}).status_code==422
+    assert client.post('/api/resumes/'+resume['id']+'/auto-run',json={'max_contacts':121}).status_code==422
+    assert client.post('/api/resumes/'+resume['id']+'/auto-run',json={'max_contacts':120,'matching_mode':'rules'}).status_code==200
+    large=client.app.state.runner.commands[-1]['plan']
+    assert large['max_greetings']==large['max_deliveries']==120 and large['max_jobs']==100
 
 
 def test_resume_without_direction_cannot_start_auto_outreach(client):
