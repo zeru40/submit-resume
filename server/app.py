@@ -19,6 +19,7 @@ import config
 from core.store import Store, now, dumps
 from core.runner import Runner
 from services.resumes import import_resume, MAX_BYTES
+from services.ai_matching import AIError, AISettings, AIJobMatcher, configured, public_settings, validate_config
 
 class Plan(BaseModel):
     model_config = ConfigDict(extra='forbid')
@@ -43,6 +44,7 @@ class Plan(BaseModel):
     communication_only: bool = False
     skip_existing_contacts: bool = True
     resume_based: bool = False
+    matching_mode: str=Field(default='rules',pattern=r'^(rules|ai)$')
     search_keywords: list[Annotated[str,Field(min_length=1,max_length=100)]] = Field(default_factory=list,max_length=3)
     zhilian_online_resume: bool = False
 
@@ -51,6 +53,7 @@ class ResumeRunBody(BaseModel):
     city: str = Field(default='厦门',min_length=1,max_length=40)
     boss_city_code: str = Field(default='101230200',pattern=r'^\d{3,12}$')
     max_contacts: int = Field(default=5,ge=1,le=5)
+    matching_mode: str=Field(default='ai',pattern=r'^(rules|ai)$')
 
 class RunBody(BaseModel):
     model_config = ConfigDict(extra='forbid')
@@ -105,6 +108,8 @@ def create_app(data_dir=None, runner_factory=Runner):
     async def invalid(request,exc):
         from fastapi.responses import JSONResponse
         return JSONResponse({'detail':str(exc)},status_code=400)
+
+    app.add_exception_handler(AIError,invalid)
 
     @app.get('/',response_class=HTMLResponse)
     def index():
@@ -183,12 +188,13 @@ def create_app(data_dir=None, runner_factory=Runner):
         if not resume:raise HTTPException(404,'简历不存在')
         strategy=resume_strategy(resume['text'])
         if not strategy['ready']:raise ValueError('未识别到明确求职方向，请补充求职意向或使用手动方案')
+        ai=configured(store) if body.matching_mode=='ai' else None
         plan=Plan(name='简历自动求职 · '+resume['name'][:50],keyword=strategy['keywords'][0],
             city=body.city,boss_city_code=body.boss_city_code,resume_id=ident,
-            skills=','.join(strategy['skills']),min_score=40,max_pages=1,max_jobs=5,
+            skills=','.join(strategy['skills']),min_score=ai['min_score'] if ai else 40,max_pages=1,max_jobs=5,
             max_deliveries=body.max_contacts,interval_seconds=60,communication_only=True,
             personalized_greeting=True,greeting_style='job_interest',skip_existing_contacts=True,resume_based=True,
-            search_keywords=strategy['keywords'])
+            search_keywords=strategy['keywords'],matching_mode=body.matching_mode)
         value=save_plan(plan)
         runner.submit({'type':'run','mode':'auto','plan':value,'resume':resume,
             'platforms':['boss'],'job_ids':[],'search_keywords':strategy['keywords']})
@@ -241,6 +247,9 @@ def create_app(data_dir=None, runner_factory=Runner):
         resume=store.one('SELECT text FROM resumes WHERE id=?',(value.resume_id,))
         if not resume:
             raise ValueError('请在方案中选择简历')
+        if value.matching_mode=='ai':
+            result=AIJobMatcher(store).evaluate(json.loads(job['body']),resume['text'])
+            return dict(result,message=result['greeting'],resume_evidence=result['evidence'])
         if value.personalized_greeting:
             if value.greeting_style=='job_interest':
                 return job_interest_greeting(json.loads(job['body']))
@@ -280,7 +289,9 @@ def create_app(data_dir=None, runner_factory=Runner):
         if not row:
             raise ValueError('请先保存求职方案')
         plan = Plan.model_validate(json.loads(row['body'])).model_dump()
+        if plan.get('matching_mode')=='ai':configured(store)
         resume = store.one('SELECT * FROM resumes WHERE id=?',(plan['resume_id'],)) if plan['resume_id'] else None
+        if plan.get('matching_mode')=='ai' and not resume:raise ValueError('大模型匹配前请先选择简历')
         if body.mode == 'auto':
             if not resume or not Path(resume['path']).is_file():
                 raise ValueError('自动投递前请导入并选择简历')
@@ -331,8 +342,26 @@ def create_app(data_dir=None, runner_factory=Runner):
 
     @app.get('/api/settings')
     def settings():
-        return {'data_dir':str(directory),'matching':'本地规则','platforms':['boss','zhilian'],
-                'version':'0.1.0','resume_types':['PDF','DOCX','TXT']}
+        return {'data_dir':str(directory),'matching':'大模型 / 本地规则','platforms':['boss','zhilian'],
+                'ai':public_settings(store),'version':'0.2.0','resume_types':['PDF','DOCX','TXT']}
+
+    @app.put('/api/settings/ai')
+    def save_ai(body:AISettings):
+        if runner.snapshot()['busy']:raise ValueError('任务运行中不能修改模型配置')
+        value=body.model_dump()
+        if not value['api_key']:value['api_key']=store.setting('ai',{}).get('api_key','')
+        value=validate_config(value)
+        store.set_setting('ai',value)
+        return public_settings(store)
+
+    @app.post('/api/settings/ai/test')
+    def test_ai():
+        if runner.snapshot()['busy']:raise ValueError('请在任务停止后测试模型')
+        result=AIJobMatcher(store).evaluate(
+            {'title':'Python开发工程师','company':'合成测试公司','location':'厦门',
+             'description':'负责Python后台服务和业务接口开发，构建RAG知识库问答与工具调用系统，完成系统集成和质量验证。'},
+            '求职意向：Python开发。参与Python后台服务开发，搭建RAG知识库问答系统，负责接口集成和验证。')
+        return {'ok':True,'score':result['score'],'model':result['model']}
 
     app.mount('/static',StaticFiles(directory=config.WEB),name='static')
     return app

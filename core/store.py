@@ -19,6 +19,7 @@ class Store:
         with self.db() as db:
             db.executescript('''
             CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS ai_assessments(id TEXT PRIMARY KEY,result TEXT NOT NULL,created_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS resumes(id TEXT PRIMARY KEY,name TEXT NOT NULL,path TEXT NOT NULL,
                 sha256 TEXT NOT NULL,text TEXT NOT NULL,created_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS plans(id TEXT PRIMARY KEY,name TEXT NOT NULL,body TEXT NOT NULL,updated_at TEXT NOT NULL);

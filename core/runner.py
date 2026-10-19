@@ -17,6 +17,8 @@ class Runner:
     def __init__(self, store, data_dir, factory=None):
         self.store, self.data_dir = store, data_dir
         self.factory = factory
+        from services.ai_matching import AIJobMatcher
+        self.ai_matcher = AIJobMatcher(store)
         self.control = Control()
         self.commands = queue.Queue()
         self.lock = threading.RLock()
@@ -202,6 +204,10 @@ class Runner:
             self.store.execute('UPDATE runs SET status=?,error=?,updated_at=? WHERE id=?', (status,message,now(),run_id))
 
     def _run(self, command, playwright):
+        if command['plan'].get('matching_mode')=='ai':
+            from services.ai_matching import AIError,configured
+            configured(self.store)
+            if not command.get('resume'):raise AIError('大模型匹配需要先选择简历，已停止')
         keywords=command.get('search_keywords',[])
         if not keywords:
             return self._run_single(command,playwright)
@@ -220,6 +226,22 @@ class Runner:
             command['keywords_completed']=index+1
             if index+1<len(keywords[:3]) and attempted<maximum:
                 self.control.wait(60)
+
+    def _assess(self, job, plan, resume_text):
+        job.pop('ai_assessment',None)
+        if plan.get('matching_mode')!='ai':return match_job(job,plan,resume_text)
+        # Keep explicit city/salary/exclusion gates, let the model judge semantic
+        # relevance rather than silently substituting a local keyword score.
+        gate_plan=dict(plan,skills='',resume_based=False,greeting_style='job_interest',min_score=0)
+        _,reasons,allowed=match_job(job,gate_plan,resume_text)
+        if not allowed:return 0,reasons,False
+        self.control.checkpoint()
+        self.update(message='大模型正在评估简历与岗位并生成招呼')
+        result=self.ai_matcher.evaluate(job,resume_text)
+        self.control.checkpoint()
+        job['ai_assessment']=result
+        reasons=['大模型评分：'+str(result['score'])]+result['reasons']+['待确认：'+x for x in result['missing']]
+        return result['score'],reasons,result['suitable'] and result['score']>=plan.get('min_score',70)
 
     def _run_single(self, command, playwright, root_command=None):
         plan = command['plan']
@@ -265,7 +287,7 @@ class Runner:
                     search_plan['_skip_job_ids'] = {row['job_id'] for row in protected}
                     search_plan['_skip_companies'] = existing_companies | {row['company'] for row in protected}
                 for job in adapter.search(search_plan):
-                    score, reasons, eligible = match_job(job, plan, resume['text'] if resume else '')
+                    score, reasons, eligible = self._assess(job, plan, resume['text'] if resume else '')
                     self.store.upsert_job(job,score,reasons,eligible)
                     jobs.append(job)
                     self.update(scanned=self.snapshot()['scanned']+1,current=job['title'],message='正在读取岗位详情')
@@ -274,7 +296,14 @@ class Runner:
                 continue
             for job in jobs:
                 self.control.checkpoint(adapter.page.wait_for_timeout)
-                score, reasons, eligible = match_job(job, plan, resume['text'] if resume else '')
+                if code=='boss' and plan.get('skip_existing_contacts'):
+                    protected=self.store.one('''SELECT a.id FROM applications a JOIN jobs j ON j.id=a.job_id
+                        WHERE a.scope=? AND j.platform='boss' AND (a.job_id=? OR j.company=?)
+                        AND (a.status IN ('message_sent','needs_review','delivered','waiting_reply','previously_contacted','unavailable','withdrawn','retracted')
+                        OR EXISTS (SELECT 1 FROM actions x WHERE x.application_id=a.id AND x.status IN ('sent','pending','unknown'))) LIMIT 1''',
+                        (scope,f"{code}:{job['external_id']}",job['company']))
+                    if protected or job['company'] in existing_companies:continue
+                score, reasons, eligible = self._assess(job, plan, resume['text'] if resume else '')
                 job_id = self.store.upsert_job(job,score,reasons,eligible)
                 if not eligible:
                     continue
@@ -310,7 +339,7 @@ class Runner:
                         except BeforeClickError as exc:
                             self.store.application_status(application['id'],'unavailable')
                             self.store.log('跳过暂时无法定位的岗位：'+job['company']+' · '+str(exc),'warning')
-                            if plan.get('resume_based'):raise
+                            if plan.get('resume_based') or plan.get('matching_mode')=='ai':raise
                             continue
                     else:
                         adapter.goto(job['url'])
@@ -323,7 +352,11 @@ class Runner:
                         existing_companies.add(job['company'])
                         continue
                     composition=None
-                    if plan.get('personalized_greeting',False):
+                    if plan.get('matching_mode')=='ai':
+                        result=job['ai_assessment']
+                        composition={'message':result['greeting'],'method':result['method'],
+                            'job_requirement':result['job_focus'],'resume_evidence':result['evidence'],'ai_score':result['score']}
+                    elif plan.get('personalized_greeting',False):
                         from services.greeting import personalized_greeting, job_interest_greeting
                         try:
                             composition=(job_interest_greeting(job) if plan.get('greeting_style')=='job_interest'
@@ -345,7 +378,7 @@ class Runner:
                     try:
                         receipt = self._action(adapter, application, 'contact', lambda: adapter.contact(job,scope))
                     except NeedHuman as exc:
-                        if plan.get('resume_based'):raise
+                        if plan.get('resume_based') or plan.get('matching_mode')=='ai':raise
                         if not (plan.get('communication_only') and plan.get('skip_existing_contacts')):
                             raise
                         # Quarantine this reserved contact without retrying it.

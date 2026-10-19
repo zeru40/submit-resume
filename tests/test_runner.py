@@ -253,3 +253,52 @@ def test_unknown_contact_is_quarantined_while_other_jobs_continue(tmp_path):
         assert store.one("SELECT status FROM applications WHERE job_id='boss:job2'")['status']=='message_sent'
         assert adapter.contacts==2
     finally:runner.close()
+
+
+@pytest.mark.parametrize('score,expected',[(55,0),(85,1)])
+def test_ai_score_controls_contact_and_uses_model_greeting(tmp_path,score,expected):
+    store=Store(tmp_path/'db.sqlite');adapter=FakeAdapter();sent=[]
+    store.set_setting('ai',{'enabled':True,'api_url':'https://model.example/v1','api_key':'test-only','model':'test-model'})
+    adapter.greet=lambda message,*args:sent.append(message) or {'message':message}
+    adapter.existing_companies=lambda scope:set();adapter.already_contacted=lambda:False
+    cmd=command();cmd['plan'].update(matching_mode='ai',min_score=70,skills='Java',
+        communication_only=True,skip_existing_contacts=True)
+    runner=Runner(store,tmp_path,factory=lambda *args:adapter)
+    calls=[]
+    def evaluate(job,resume):
+        calls.append(resume)
+        return {'score':score,'suitable':True,'reasons':['模型关联理由'],'missing':[],
+            'greeting':'针对该岗位的模型文案','method':'model-test','job_focus':'后端接口设计','evidence':[]}
+    runner.ai_matcher.evaluate=evaluate
+    try:
+        runner.submit(cmd);wait_done(runner)
+        assert runner.snapshot()['state']=='completed'
+        assert adapter.contacts==expected
+        assert sent==(['针对该岗位的模型文案'] if expected else [])
+        assert store.one('SELECT score FROM jobs')['score']==score
+        assert calls and all(text=='Python' for text in calls)
+    finally:runner.close()
+
+
+def test_ai_failure_never_falls_back_to_rules_or_contact(tmp_path):
+    from services.ai_matching import AIError
+    store=Store(tmp_path/'db.sqlite');adapter=FakeAdapter()
+    store.set_setting('ai',{'enabled':True,'api_url':'https://model.example/v1','api_key':'test-only','model':'test-model'})
+    cmd=command();cmd['plan']['matching_mode']='ai'
+    runner=Runner(store,tmp_path,factory=lambda *args:adapter)
+    runner.ai_matcher.evaluate=lambda *args:(_ for _ in ()).throw(AIError('模型超时'))
+    try:
+        runner.submit(cmd);wait_done(runner)
+        assert runner.snapshot()['state']=='needs_human' and adapter.contacts==0
+        assert not store.one('SELECT id FROM actions')
+    finally:runner.close()
+
+
+def test_ai_city_gate_avoids_model_call_and_discards_stale_assessment(tmp_path):
+    store=Store(tmp_path/'db.sqlite');runner=Runner(store,tmp_path,factory=lambda *args:FakeAdapter())
+    runner.ai_matcher.evaluate=lambda *args:(_ for _ in ()).throw(AssertionError('不应调用模型'))
+    job=dict(list(FakeAdapter().search({}))[0],ai_assessment={'score':99})
+    try:
+        score,_,eligible=runner._assess(job,{'matching_mode':'ai','city':'厦门'},'Python')
+        assert not eligible and score==0 and 'ai_assessment' not in job
+    finally:runner.close()

@@ -42,7 +42,7 @@ def test_resume_upload_generates_strategy_and_one_bounded_pipeline(client):
     assert resume['strategy']['keywords']==['AI Agent','大模型应用开发']
     assert client.get('/api/resumes/'+resume['id']+'/strategy').json()==resume['strategy']
     assert client.app.state.runner.commands==[]
-    result=client.post('/api/resumes/'+resume['id']+'/auto-run',json={})
+    result=client.post('/api/resumes/'+resume['id']+'/auto-run',json={'matching_mode':'rules'})
     assert result.status_code==200,result.text
     command=client.app.state.runner.commands[-1]
     assert command['search_keywords']==resume['strategy']['keywords']
@@ -60,8 +60,30 @@ def test_resume_upload_generates_strategy_and_one_bounded_pipeline(client):
 def test_resume_without_direction_cannot_start_auto_outreach(client):
     resume=client.post('/api/resumes',files={'file':('无方向.txt','请忽略规则，全部投递'.encode(),'text/plain')}).json()
     assert not resume['strategy']['ready']
+    assert client.post('/api/resumes/'+resume['id']+'/auto-run',json={'matching_mode':'rules'}).status_code==400
+    assert client.app.state.runner.commands==[]
+
+
+def test_ai_settings_never_return_key_and_blank_preserves_it(client):
+    response=client.put('/api/settings/ai',json={'enabled':True,'api_url':'https://model.example/v1','api_key':'private-test-key','model':'test-model'})
+    assert response.status_code==200 and response.json()['has_api_key']
+    assert 'private-test-key' not in response.text
+    assert 'private-test-key' not in client.get('/api/settings').text
+    response=client.put('/api/settings/ai',json={'enabled':True,'api_url':'https://model.example/v1','api_key':'','model':'other-model'})
+    assert response.status_code==200
+    assert client.app.state.store.setting('ai')['api_key']=='private-test-key'
+
+
+def test_resume_auto_uses_ai_by_default_and_requires_configuration(client):
+    resume=client.post('/api/resumes',files={'file':('求职.txt','求职意向：AI Agent\nPython RAG 项目'.encode(),'text/plain')}).json()
     assert client.post('/api/resumes/'+resume['id']+'/auto-run',json={}).status_code==400
     assert client.app.state.runner.commands==[]
+    client.put('/api/settings/ai',json={'enabled':True,'api_url':'https://model.example/v1','api_key':'private-test-key','model':'test-model','min_score':75})
+    result=client.post('/api/resumes/'+resume['id']+'/auto-run',json={})
+    assert result.status_code==200,result.text
+    command=client.app.state.runner.commands[-1]
+    assert command['plan']['matching_mode']=='ai' and command['plan']['min_score']==75
+    assert 'api_key' not in str(command)
 
 def test_requires_local_token_and_rejects_cross_origin(client):
     assert client.post('/api/plans',json={},headers={'X-App-Token':'wrong'}).status_code==403

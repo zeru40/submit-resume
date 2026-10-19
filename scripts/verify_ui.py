@@ -60,6 +60,9 @@ def main():
                     page.get_by_role('button',name=label,exact=True).click()
                     page.get_by_role('heading',name=label,exact=True).wait_for()
                     assert page.locator('body').inner_text().strip()
+                    if label=='设置':
+                        page.get_by_role('heading',name='大模型匹配与招呼',exact=True).wait_for()
+                        assert page.get_by_label('API 密钥',exact=True).input_value()==''
                 page.get_by_role('button',name='工作台',exact=True).click()
                 page.set_viewport_size({'width':1050,'height':850})
                 page.screenshot(path=str(output/'dashboard-compact.png'),full_page=True)
