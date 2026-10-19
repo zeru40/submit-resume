@@ -2,12 +2,19 @@ from urllib.parse import parse_qs, urlsplit
 from pathlib import Path
 import json
 import hashlib
+import time
 from urllib.parse import quote
 from core.control import NeedHuman
 from platforms.base import ApplicantPlatform, BeforeClickError, JobUnavailable
 
 class WaitingReply(BeforeClickError):
     """The platform requires a reply before enabling attachment delivery."""
+
+def avatar_key(value):
+    parsed=urlsplit(value or '')
+    path=parsed.path
+    if path.lower().endswith(('.jpg.webp','.jpeg.webp','.png.webp')):path=path[:-5]
+    return parsed._replace(path=path,query='',fragment='').geturl()
 
 class BossApplicant(ApplicantPlatform):
     """Explicitly distinguishes opening a conversation from delivering an attachment."""
@@ -113,9 +120,10 @@ class BossApplicant(ApplicantPlatform):
                     company:parts[1]||'',title:titles.length===1?titles[0].innerText.trim():''};
         }''')
 
-    def chat_receipt(self, job, expected_avatar):
+    def chat_receipt(self, job, expected_avatar, expected_name=''):
         snapshot=self.chat_snapshot()
-        if (not expected_avatar or snapshot['avatar']!=expected_avatar.split('?')[0]
+        if (not expected_avatar or avatar_key(snapshot['avatar'])!=avatar_key(expected_avatar)
+                or (expected_name and snapshot['name']!=expected_name)
                 or snapshot['company']!=job['company'] or snapshot['title'] not in
                 {job['title'],'兼职·'+job['title'],'全职·'+job['title'],'实习·'+job['title']}):
             raise BeforeClickError('聊天对象、公司或岗位与来源不一致，未发送内容')
@@ -223,42 +231,83 @@ class BossApplicant(ApplicantPlatform):
         if button.evaluate("e=>e.matches('.is-disabled,.disabled,[aria-disabled=\"true\"]')"):
             raise BeforeClickError('沟通入口尚不可用，未发起沟通')
         href = button.get_attribute('redirect-url') or button.get_attribute('href') or ''
-        avatar=self.first(['.job-boss-info .detail-figure img','.job-boss-info img'])
+        hr=self.unique(['.job-detail-container .job-boss-info','.job-boss-info'])
+        avatar=self.first(['.detail-figure img','img'],hr) if hr else None
         expected_avatar=avatar.get_attribute('src') if avatar else ''
+        name=self.first(['.name'],hr) if hr else None
+        expected_name=name.evaluate("e=>[...e.childNodes].filter(n=>n.nodeType===3).map(n=>n.textContent).join('').trim()") if name else ''
         query = parse_qs(urlsplit(href).query)
+        if query.get('jobId') and query['jobId']!=[job['external_id']]:
+            raise BeforeClickError('沟通入口关联的岗位与目标不一致，未点击沟通')
         expected_peer = (query.get('bossId') or query.get('encryptBossId') or query.get('id') or [''])[0]
         if not expected_peer:
             reference = self.first(['[data-boss-id]','.job-boss-info a[href*="bossId="]','.boss-info a[href*="bossId="]'])
             if reference:
                 expected_peer = reference.get_attribute('data-boss-id') or (parse_qs(urlsplit(reference.get_attribute('href') or '').query).get('bossId') or [''])[0]
+        if not expected_peer and not (expected_avatar and expected_name):
+            raise BeforeClickError('沟通前缺少来源HR身份信息，未点击沟通')
+        previous_pages=list(self.context.pages)
+        evidence={'job_id':job['external_id'],'company':job['company'],'title':job['title'],
+                  'expected_hr_name':expected_name,'expected_avatar':avatar_key(expected_avatar),'observations':[]}
+        evidence_path=self.data_dir/'diagnostics'/f"boss-contact-{hashlib.sha256(job['external_id'].encode()).hexdigest()[:12]}-{time.time_ns()}.json"
+        evidence_path.parent.mkdir(parents=True,exist_ok=True)
+        def observe(before=False):
+            info=self.page.evaluate('''()=>({path:location.pathname,
+                blocked:['访问受限','已暂时被限制访问','今日沟通人数已达上限','今日沟通数量已达上限',
+                    '今日沟通次数已达上限','沟通人数已达上限','操作过于频繁','请完成安全验证','账号异常']
+                    .filter(text=>document.body.innerText.includes(text)),
+                notices:[...document.querySelectorAll('[role="alert"],[role="dialog"],.dialog-wrap,.dialog-container,.toast,.toast-content,.message-tip,.message-error,.error-tip')]
+                    .filter(e=>e.getClientRects().length&&getComputedStyle(e).visibility!=='hidden')
+                    .map(e=>e.innerText.trim().slice(0,600)).filter(Boolean),
+                friendship:[...document.querySelectorAll('.job-detail-container .op-btn-chat,.btn-startchat')]
+                    .filter(e=>e.getClientRects().length).map(e=>({text:e.innerText.trim(),flag:e.getAttribute('data-isfriend')}))})''')
+            if not evidence['observations'] or evidence['observations'][-1]!=info:
+                evidence['observations'].append(info)
+                evidence_path.write_text(json.dumps(evidence,ensure_ascii=False),encoding='utf-8')
+            if info['notices'] or info['blocked']:
+                if before:raise BeforeClickError('沟通前页面存在提示或弹窗，未点击沟通，请先处理原页面')
+                if info['blocked']:raise NeedHuman('平台提示：'+'、'.join(info['blocked'])+'；已保留现场，未发送文案')
+                raise NeedHuman('点击沟通后平台出现提示，已保留原页面和本地诊断，未发送文案，请人工核验')
+            return any(x['flag'] in ('true','1') or '继续沟通' in x['text'] or '已沟通' in x['text'] for x in info['friendship'])
+        # Persist only local identity evidence, never redirect URLs/security tokens.
+        evidence_path.write_text(json.dumps(evidence,ensure_ascii=False),encoding='utf-8')
+        observe(before=True)
         generation = self.control.generation
         if generation != self.control.generation:
             raise BeforeClickError('操作状态变化')
         self.external_click(button)
+        confirmed_contact=False
+        continued=False
         # Clicking contact itself may send a platform greeting. Never re-click it.
         for _ in range(25):
             self.checkpoint()
             # A document may be replaced while the click navigates. Read again,
             # without repeating the external contact click.
             try:
+                confirmed_contact=observe() or confirmed_contact
                 continu = self.unique(self.spec['continue_chat'])
             except RuntimeError:
                 self.page.wait_for_timeout(300)
                 continue
-            if continu:
+            if continu and not continued:
                 continu.click()
+                continued=True
             pages = [p for p in self.context.pages if not p.is_closed()]
-            candidate = next((p for p in reversed(pages) if '/chat' in p.url and p != self.page), None)
+            candidate = next((p for p in reversed(pages) if '/web/geek/chat' in p.url
+                              and p != self.page and p not in previous_pages), None)
             if candidate:
                 self.page = candidate
             if '/chat' in self.page.url and self.first(self.spec['input']):
+                self.ensure_session(scope)
                 if expected_avatar:
                     try:
-                        return self.chat_receipt(job,expected_avatar)
+                        receipt=self.chat_receipt(job,expected_avatar,expected_name)
                     except BeforeClickError:
                         # The editor can render before the selected row/header.
                         self.page.wait_for_timeout(400)
                         continue
+                    if self.outbound():raise NeedHuman('对应会话已有发出消息，保留待核验，不补发文案')
+                    return receipt
                 actual = self.peer()
                 if not actual or (expected_peer and actual != expected_peer):
                     raise NeedHuman('已进入聊天，但无法核验目标HR，需人工检查')
@@ -268,34 +317,39 @@ class BossApplicant(ApplicantPlatform):
                     if chat_title != job['title'] or not chat_company or chat_company != job['company']:
                         raise NeedHuman('已进入聊天，缺少来源HR标识且无法匹配岗位与公司，请人工核验')
                 # A stable link and a loaded chat prove navigation, not resume delivery.
+                if self.outbound():raise NeedHuman('对应会话已有发出消息，保留待核验，不补发文案')
                 return {'peer': actual, 'chat_url': self.page.url,
                         'chat_job_ref':(parse_qs(urlsplit(self.page.url).query).get('jobId') or [''])[0]}
             self.page.wait_for_timeout(400)
         # Some browser sessions keep the job page after the single contact click.
         # Verify the resulting conversation via the ordinary message-center UI;
         # do not click contact again or reuse a previously held action.
-        if expected_avatar:
+        if expected_avatar and confirmed_contact:
             self.ensure_session(scope)
             self.goto('https://www.zhipin.com/web/geek/chat')
             self.ensure_session(scope)
-            source_avatar=expected_avatar.split('?')[0]
+            source_avatar=avatar_key(expected_avatar)
             selected=False
             for _ in range(25):
                 self.checkpoint()
                 if not selected:
-                    indices=self.page.evaluate('''()=>[...document.querySelectorAll('.friend-content')]
-                        .map((e,i)=>({i,avatar:(e.querySelector('img')?.getAttribute('src')||'').split('?')[0],
-                            company:e.querySelector('.name-box > span:nth-child(2)')?.innerText.trim()}))
-                        .filter(e=>e.avatar==='''+json.dumps(source_avatar)+'''&&e.company==='''+json.dumps(job['company'])+''').map(e=>e.i)''')
+                    rows=self.page.evaluate('''()=>[...document.querySelectorAll('.friend-content')]
+                        .map((e,i)=>({i,avatar:e.querySelector('img')?.src||'',
+                            name:e.querySelector('.name-text')?.innerText.trim()||'',
+                            company:e.querySelector('.name-box > span:nth-child(2)')?.innerText.trim()}))''')
+                    indices=[r['i'] for r in rows if avatar_key(r['avatar'])==source_avatar
+                             and r['company']==job['company'] and (not expected_name or r['name']==expected_name)]
                     if len(indices)==1:
                         row=self.page.locator('.friend-content').nth(indices[0])
-                        matches=row.evaluate('e=>(e.querySelector("img")?.getAttribute("src")||"").split("?")[0]==='+json.dumps(source_avatar)+'&&e.querySelector(".name-box > span:nth-child(2)")?.innerText.trim()==='+json.dumps(job['company']))
+                        current=row.evaluate('''e=>({avatar:e.querySelector('img')?.src||'',name:e.querySelector('.name-text')?.innerText.trim()||'',company:e.querySelector('.name-box > span:nth-child(2)')?.innerText.trim()})''')
+                        matches=(avatar_key(current['avatar'])==source_avatar and current['company']==job['company']
+                                 and (not expected_name or current['name']==expected_name))
                         if matches:
                             row.click()
                             selected=True
                 if selected:
                     try:
-                        receipt=self.chat_receipt(job,expected_avatar)
+                        receipt=self.chat_receipt(job,expected_avatar,expected_name)
                     except BeforeClickError:
                         self.page.wait_for_timeout(400)
                         continue
@@ -303,7 +357,7 @@ class BossApplicant(ApplicantPlatform):
                         raise NeedHuman('对应会话已有发出消息，保留待核验，不补发文案')
                     return receipt
                 self.page.wait_for_timeout(400)
-        raise NeedHuman('沟通按钮已点击，未获得可核验会话，请检查是否已经发起沟通')
+        raise NeedHuman('沟通点击后未取得完整回执，已保留现场并标记待核验；不会跳转掩盖提示或重复点击')
 
     def open_chat(self, receipt, scope):
         if '/web/geek/chat' not in self.page.url:

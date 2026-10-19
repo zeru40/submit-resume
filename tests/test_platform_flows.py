@@ -309,11 +309,11 @@ def test_spa_card_selection_binds_contact_action_to_job(browser,tmp_path):
 def test_contact_verifies_message_center_without_reclick(browser,tmp_path,monkeypatch,has_prior_message):
     def handler(route):
         if '/chat' in route.request.url:
-            html=ACCOUNT+CHAT+'''<div class="friend-content selected"><img src="https://example.com/hr.png"><div class="name-box"><span>黄女士</span><span>测试公司</span></div></div><div class="chat-conversation"><span class="position-name">AI开发</span></div>'''
+            html=ACCOUNT+CHAT+'''<div class="friend-content selected"><img src="https://example.com/hr.png"><div class="name-box"><span class="name-text">黄女士</span><span>测试公司</span></div></div><div class="chat-conversation"><span class="position-name">AI开发</span></div>'''
             if has_prior_message:
                 html+='<div class="message-item sent">此前已经沟通</div>'
         else:
-            html=ACCOUNT+'''<div class="job-detail-container"><div class="job-detail-header"><span class="job-name">AI开发</span></div><a class="op-btn-chat" ka="chat_job1" href="javascript:;">立即沟通</a></div><div class="job-boss-info"><img src="https://example.com/hr.png"></div>'''
+            html=ACCOUNT+'''<div class="job-detail-container"><div class="job-detail-header"><span class="job-name">AI开发</span></div><a class="op-btn-chat" ka="chat_job1" href="javascript:;" onclick="this.dataset.isfriend='true'">立即沟通</a></div><div class="job-boss-info"><h2 class="name">黄女士</h2><img src="https://example.com/hr.png"></div>'''
         route.fulfill(content_type='text/html; charset=utf-8',body=html)
     a=adapter(browser,BossApplicant,tmp_path,handler)
     clicks=[]
@@ -336,4 +336,61 @@ def test_contact_verifies_message_center_without_reclick(browser,tmp_path,monkey
             assert receipt['identity']['title']=='AI开发'
             assert not a.outbound()
         assert len(clicks)==1
+    finally:a.close()
+
+
+@pytest.mark.parametrize('variant',['inert','notice','old_tab','no_identity','preexisting_dialog','hidden_source'])
+def test_contact_failure_preserves_original_page_without_second_click(browser,tmp_path,monkeypatch,variant):
+    clicks=[];chat_visits=[]
+    action=''
+    if variant=='notice':action="document.querySelector('[role=alert]').textContent='今日沟通次数已达上限'"
+    source=ACCOUNT+f'''<div class="job-detail-container"><div class="job-detail-header"><span class="job-name">AI开发</span></div>
+        <a class="op-btn-chat" ka="chat_job1" href="javascript:;" onclick="{action}">立即沟通</a></div>
+        <div role="alert"></div>'''
+    if variant!='no_identity':source+='<div class="job-boss-info"><h2 class="name">黄女士<span>在线</span></h2><img src="https://example.com/hr.png"></div>'
+    if variant=='hidden_source':source='<div class="job-boss-info" style="display:none"><h2 class="name">旧岗位HR</h2><img src="https://example.com/old.png"></div>'+source
+    if variant=='preexisting_dialog':source+='<div role="dialog">需要先处理的页面提示</div>'
+    def handler(route):
+        if '/chat' in route.request.url:chat_visits.append(route.request.url)
+        route.fulfill(content_type='text/html; charset=utf-8',body=source)
+    a=adapter(browser,BossApplicant,tmp_path,handler)
+    if variant=='old_tab':
+        old=a.context.new_page();old.goto('https://www.zhipin.com/web/geek/chat')
+        chat_visits.clear()
+    original=a.external_click
+    def click(button):clicks.append(True);original(button)
+    monkeypatch.setattr(a,'external_click',click)
+    monkeypatch.setattr(a.page,'wait_for_timeout',lambda ms:None)
+    try:
+        a.goto('https://www.zhipin.com/web/geek/jobs')
+        original_page=a.page
+        scope=a.ensure_session()
+        a.page.bring_to_front()
+        with pytest.raises(NeedHuman):a.contact({'external_id':'job1','title':'AI开发','company':'测试公司'},scope)
+        assert len(clicks)==(0 if variant in ('no_identity','preexisting_dialog') else 1)
+        assert a.page==original_page and '/jobs' in a.page.url
+        assert not chat_visits
+        assert not a.outbound()
+        diagnostics=list((tmp_path/'diagnostics').glob('boss-contact-*.json'))
+        if variant!='no_identity':
+            assert diagnostics and 'securityId' not in diagnostics[0].read_text(encoding='utf-8')
+            if variant=='hidden_source':assert json.loads(diagnostics[0].read_text(encoding='utf-8'))['expected_hr_name']=='黄女士'
+    finally:a.close()
+
+
+def test_avatar_transport_variant_requires_matching_name_company_and_job(browser,tmp_path):
+    def handler(route):
+        route.fulfill(content_type='text/html; charset=utf-8',body=ACCOUNT+CHAT+'''
+            <div class="friend-content selected"><img src="https://example.com/hr.jpg.webp?resize=80"><div class="name-box">
+            <span class="name-text">黄女士</span><span>测试公司</span></div></div>
+            <div class="chat-conversation"><span class="position-name">AI开发</span></div>''')
+    a=adapter(browser,BossApplicant,tmp_path,handler)
+    try:
+        a.goto('https://www.zhipin.com/web/geek/chat')
+        job={'external_id':'job1','title':'AI开发','company':'测试公司'}
+        assert a.chat_receipt(job,'https://example.com/hr.jpg?resize=100','黄女士')['identity']['name']=='黄女士'
+        for incorrect in [dict(job,company='另一公司'),dict(job,title='另一岗位')]:
+            with pytest.raises(NeedHuman):a.chat_receipt(incorrect,'https://example.com/hr.jpg','黄女士')
+        with pytest.raises(NeedHuman):a.chat_receipt(job,'https://example.com/hr.jpg','另一HR')
+        assert not a.outbound()
     finally:a.close()
