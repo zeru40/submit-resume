@@ -75,3 +75,22 @@ def test_hidden_page_refuses_input_instead_of_silent_click():
     page.evaluate=lambda _:'hidden';page.wait_for_timeout=lambda _:None
     with pytest.raises(RuntimeError,match='不可见'):page.bring_to_front()
     assert calls==['Page.bringToFront']
+
+
+@pytest.mark.parametrize('window_state,focused,ready,allowed',[
+    ('normal',True,True,True),('maximized',True,True,True),
+    ('minimized',True,True,False),('normal',False,True,False),
+    ('normal',True,False,False),
+])
+def test_occluded_selected_tab_requires_ready_layout_and_restored_window(window_state,focused,ready,allowed):
+    from types import SimpleNamespace
+    from core.cdp_page import CdpPage
+    page=object.__new__(CdpPage);page.ident='local-test'
+    page.context=SimpleNamespace(browser_client=SimpleNamespace(call=lambda *args:{'windowId':1,'bounds':{'windowState':window_state}}))
+    page.client=SimpleNamespace(call=lambda *args:None)
+    page.evaluate=lambda expression:('hidden' if expression=='document.visibilityState' else
+        {'focused':focused,'ready':ready,'layout':True,'width':800,'height':600})
+    page.wait_for_timeout=lambda _:None
+    if allowed:page.bring_to_front()
+    else:
+        with pytest.raises(RuntimeError,match='不可见'):page.bring_to_front()

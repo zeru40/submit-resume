@@ -136,6 +136,18 @@ class CdpPage:
         self.client.call('Page.bringToFront')
         for _ in range(20):
             if self.evaluate('document.visibilityState')=='visible':return
+            # Windows reports a selected tab as hidden when another desktop
+            # window covers Edge. CDP input is bound to this tab, not the OS
+            # pointer; a focused, laid-out document can still receive it.
+            # Never accept a minimized window or a background/unready tab.
+            state=self.evaluate('''({focused:document.hasFocus(),ready:document.readyState!=='loading',
+                layout:document.documentElement.getClientRects().length>0,
+                width:innerWidth,height:innerHeight})''')
+            if (isinstance(state,dict) and state.get('focused') is True
+                    and state.get('ready') is True and state.get('layout') is True
+                    and state.get('width',0)>0 and state.get('height',0)>0):
+                bounds=self.context.browser_client.call('Browser.getWindowForTarget',{'targetId':self.ident})
+                if bounds.get('bounds',{}).get('windowState') in {'normal','maximized','fullscreen'}:return
             self.wait_for_timeout(100)
         raise RuntimeError('平台浏览器仍不可见，未继续页面输入；请恢复项目的 Edge 窗口')
     def close(self):
