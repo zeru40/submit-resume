@@ -289,16 +289,20 @@ class ApplicantPlatform:
             for job in batch:
                 stored = plan.get('_known_jobs', {}).get(f"{self.code}:{job['external_id']}")
                 if (stored and len(stored.get('description', '')) >= 30
-                        and all(stored.get(k) == job.get(k) for k in ('title','company'))):
-                    yield dict(job, description=stored['description'])
+                        and stored.get('listing_title',stored.get('title'))==job['title']
+                        and stored.get('company')==job.get('company')):
+                    aliases={'listing_title':stored['listing_title']} if stored.get('listing_title') else {}
+                    yield dict(job, title=stored['title'],description=stored['description'],**aliases)
                     emitted += 1
                     if emitted >= plan['max_jobs']:
                         return
                     continue
                 cached = self._search_cache.get(job['external_id'])
                 if (cached and time.monotonic() - cached['read_at'] < 3600
-                        and all(cached['job'].get(k) == job.get(k) for k in ('title','company','salary','location'))):
-                    yield dict(job, description=cached['job']['description'])
+                        and cached['job'].get('listing_title',cached['job'].get('title'))==job['title']
+                        and all(cached['job'].get(k) == job.get(k) for k in ('company','salary','location'))):
+                    aliases={'listing_title':cached['job']['listing_title']} if cached['job'].get('listing_title') else {}
+                    yield dict(job, title=cached['job']['title'],description=cached['job']['description'],**aliases)
                     emitted += 1
                     if emitted >= plan['max_jobs']:
                         return

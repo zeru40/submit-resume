@@ -3,6 +3,8 @@ from pathlib import Path
 import json
 import hashlib
 import time
+import re
+import unicodedata
 from urllib.parse import quote
 from core.control import NeedHuman
 from platforms.base import ApplicantPlatform, BeforeClickError, JobUnavailable
@@ -115,7 +117,7 @@ class BossApplicant(ApplicantPlatform):
             self.checkpoint();self.assert_url(self.page.url)
             action=self.page.locator('.job-detail-container .op-btn-chat')
             title=self.text(['.job-detail-header .job-name'])
-            if (action.count()!=1 or job['external_id'] not in (action.get_attribute('ka') or '')
+            if (action.count()!=1 or not (action.get_attribute('ka') or '').endswith('_'+job['external_id'])
                     or title!=job['title']):
                 raise BeforeClickError('列表中选中的岗位与目标不一致')
             body=self.page.locator('.job-detail-container').inner_text()
@@ -123,6 +125,43 @@ class BossApplicant(ApplicantPlatform):
                 raise JobUnavailable('岗位已经关闭或下线')
             return
         return super().verify_job(job)
+
+    def reconcile_discovery_title(self, job):
+        """Resolve a list alias only during discovery, never during sending.
+
+        BOSS may omit qualifiers such as an overseas assignment from its card.
+        Bind the complete title to the exact ID and both company labels before
+        recording it for review. A later changed title still fails verify_job.
+        """
+        snapshot=self.page.evaluate('''()=>{
+            const id=JOB_ID, selectors=COMPANY_SELECTORS;
+            const links=[...document.querySelectorAll('a.job-name')]
+                .filter(e=>e.getAttribute('href')==='/job_detail/'+id+'.html');
+            const card=links.length===1?links[0].closest('.job-card-box,.job-card-wrapper,.job-card'):null;
+            const company=card?(selectors.map(s=>card.querySelector(s)?.innerText.trim()).find(Boolean)||''):'';
+            const titles=[...document.querySelectorAll('.job-detail-header .job-name')];
+            const actions=[...document.querySelectorAll('.job-detail-container .op-btn-chat')];
+            const bosses=[...document.querySelectorAll('.job-detail-container .job-boss-info .boss-info-attr')];
+            return {links:links.length,listing:links[0]?.innerText.trim()||'',company,
+                titles:titles.length,title:titles[0]?.innerText.trim()||'',actions:actions.length,
+                reference:actions[0]?.getAttribute('ka')||'',bosses:bosses.length,
+                detail_company:bosses.length===1?bosses[0].innerText.split(' · ')[0].trim():''};
+        }'''.replace('JOB_ID',json.dumps(job['external_id']))
+           .replace('COMPANY_SELECTORS',json.dumps(self.spec['company'])))
+        if snapshot['titles']==1 and snapshot['title']==job['title']:return
+        compact=lambda text:re.sub(r'\s+','',unicodedata.normalize('NFKC',text))
+        listing,detail=compact(job['title']),compact(snapshot['title'])
+        compatible=bool(listing) and (listing==detail or (
+            detail.startswith(listing) and re.fullmatch(r'(?:\([^()]+\))+',detail[len(listing):]) is not None))
+        if (snapshot['links']!=1 or snapshot['titles']!=1 or snapshot['actions']!=1
+                or not compatible
+                or not snapshot['reference'].endswith('_'+job['external_id'])
+                or snapshot['listing']!=job['title'] or not snapshot['title']
+                or not job.get('company') or snapshot['company']!=job['company']
+                or snapshot['bosses']!=1 or snapshot['detail_company']!=job['company']):
+            raise BeforeClickError('列表与详情标题不同，且岗位ID或公司未完成唯一核验，已停止搜索')
+        job['listing_title']=job['title']
+        job['title']=snapshot['title']
 
     def read_search_description(self, job, scope):
         """Current BOSS list exposes details inline; avoid a full page per job."""
@@ -135,8 +174,9 @@ class BossApplicant(ApplicantPlatform):
         for _ in range(25):
             self.checkpoint()
             action=self.page.locator('.job-detail-container .op-btn-chat')
-            if action.count()==1 and job['external_id'] in (action.get_attribute('ka') or ''):
+            if action.count()==1 and (action.get_attribute('ka') or '').endswith('_'+job['external_id']):
                 self.ensure_session(scope)
+                self.reconcile_discovery_title(job)
                 self.verify_job(job)
                 description=self.text(self.spec['description'],self.page.locator('.job-detail-container'))
                 if len(description)>=30:return description

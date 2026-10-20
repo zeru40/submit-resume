@@ -166,6 +166,62 @@ def test_restriction_text_takes_precedence_over_account_header(browser,tmp_path)
         assert a.session()['reason']=='access_restricted'
     finally:a.close()
 
+
+@pytest.mark.parametrize('reference,company,title,accepted',[
+    ('chat_job1','测试公司','AI开发（驻日本）',True),
+    ('chat_job10','测试公司','AI开发（驻日本）',False),
+    ('chat_job1','其他公司','AI开发（驻日本）',False),
+    ('chat_job1','测试公司','销售主管',False),
+])
+def test_discovery_binds_complete_title_without_weakening_send_guard(browser,tmp_path,reference,company,title,accepted):
+    from platforms.base import BeforeClickError
+    def handler(route):
+        route.fulfill(content_type='text/html; charset=utf-8',body=ACCOUNT+f'''
+        <div class="job-card-box"><a class="job-name" href="/job_detail/job1.html" onclick="event.preventDefault()">AI开发</a>
+        <span class="company-name">测试公司</span></div>
+        <div class="job-detail-container"><div class="job-detail-header"><span class="job-name">{title}</span></div>
+        <a class="op-btn-chat" ka="{reference}" onclick="window.contacts=(window.contacts||0)+1">立即沟通</a>
+        <div class="job-boss-info"><div class="boss-info-attr">{company} · HR</div></div></div>''')
+    a=adapter(browser,BossApplicant,tmp_path,handler)
+    job={'external_id':'job1','title':'AI开发','company':'测试公司'}
+    try:
+        a.goto('https://www.zhipin.com/web/geek/jobs')
+        if accepted:
+            a.reconcile_discovery_title(job)
+            assert job['title']==title and job['listing_title']=='AI开发'
+            a.verify_job(job)
+            a.page.locator('.job-detail-header .job-name').evaluate("e=>e.innerText='AI开发（驻美国）'")
+            with pytest.raises(BeforeClickError):a.verify_job(job)
+        else:
+            with pytest.raises(BeforeClickError):a.reconcile_discovery_title(job)
+            assert job['title']=='AI开发' and 'listing_title' not in job
+        assert not a.page.evaluate('Boolean(window.contacts)')
+    finally:a.close()
+
+
+@pytest.mark.parametrize('disk_cache',[True,False])
+def test_complete_title_survives_cache_without_reopening_card(browser,tmp_path,disk_cache):
+    import time
+    details=[]
+    def handler(route):
+        if '/job_detail/' in route.request.url:details.append(route.request.url)
+        boss_routes(route)
+    a=adapter(browser,BossApplicant,tmp_path,handler)
+    try:
+        a.goto('https://www.zhipin.com/web/geek/jobs');scope=a.ensure_session()
+        saved={'external_id':'job1','platform':'boss','title':'Python 后端（驻日本）',
+               'listing_title':'Python 后端','company':'测试公司','salary':'15-25K','location':'上海',
+               'description':'负责企业知识库及模型接口集成，参与AI应用开发、检索问答功能建设、效果评测与上线维护。'}
+        p={'keyword':'Python','boss_city_code':'101230200','max_pages':1,'max_jobs':5}
+        if disk_cache:p['_known_jobs']={'boss:job1':saved}
+        else:
+            a._search_cache_scope=scope
+            a._search_cache={'job1':{'read_at':time.monotonic(),'job':saved}}
+        jobs=list(a.search(p))
+        assert len(jobs)==1 and jobs[0]['title']==saved['title']
+        assert jobs[0]['listing_title']=='Python 后端' and not details
+    finally:a.close()
+
 def test_boss_search_contact_message_and_resume(browser,tmp_path):
     a=adapter(browser,BossApplicant,tmp_path,boss_routes)
     try:
