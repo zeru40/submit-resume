@@ -13,6 +13,17 @@ from urllib.request import urlopen
 from urllib.parse import urlsplit
 
 
+def background_render_args():
+    """Keep the project's Windows renderer running when its window is covered.
+
+    These are rendering/scheduling controls; the browser sandbox, website
+    security, and automation identity stay unchanged.
+    """
+    if os.name!='nt':return []
+    return ['--disable-backgrounding-occluded-windows','--disable-renderer-backgrounding',
+            '--disable-features=CalculateNativeWinOcclusion']
+
+
 def _attach(playwright, endpoint, profile, process=None):
     from core.cdp_page import CdpContext
     return CdpContext(endpoint,profile)
@@ -55,7 +66,7 @@ def open_login_window(executable, profile, destination, data_dir, code, log):
             port=reservation.getsockname()[1]
     command=[str(executable),f'--remote-debugging-port={port}','--remote-debugging-address=127.0.0.1',
              f'--user-data-dir={profile}','--no-first-run','--no-default-browser-check',
-             '--start-maximized',destination]
+             '--start-maximized',*background_render_args(),destination]
     process=subprocess.Popen(command,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
                              creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
     marker.write_text(json.dumps({'profile':str(profile),'executable':str(executable),
@@ -86,7 +97,7 @@ def open_edge(playwright, executable, profile, destination, data_dir, code, log)
         port=reservation.getsockname()[1]
     command=[str(executable),f'--remote-debugging-port={port}',
              '--remote-debugging-address=127.0.0.1',f'--user-data-dir={profile}',
-             '--no-first-run','--no-default-browser-check','--start-maximized',destination]
+             '--no-first-run','--no-default-browser-check','--start-maximized',*background_render_args(),destination]
     process=subprocess.Popen(command,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
                              creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
     error=None

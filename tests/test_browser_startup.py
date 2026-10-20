@@ -107,6 +107,10 @@ def test_native_edge_starts_with_destination_and_without_unsafe_flags(tmp_path,m
     assert '--no-sandbox' not in command
     assert not any('AutomationControlled' in arg for arg in command)
     assert '--remote-debugging-address=127.0.0.1' in command
+    import os
+    if os.name=='nt':
+        assert '--disable-backgrounding-occluded-windows' in command
+        assert '--disable-features=CalculateNativeWinOcclusion' in command
 
 def test_normal_edge_reuses_owned_runtime_without_launching_again(tmp_path,monkeypatch):
     import core.browser_runtime as runtime
@@ -127,3 +131,5 @@ def test_manual_login_does_not_attach_or_read_page(tmp_path,monkeypatch):
     assert state['mode']=='manual_login'
     assert captured[0][-1]=='https://www.zhipin.com/web/user/?intent=0'
     assert '--no-sandbox' not in captured[0]
+    import os
+    if os.name=='nt':assert '--disable-backgrounding-occluded-windows' in captured[0]

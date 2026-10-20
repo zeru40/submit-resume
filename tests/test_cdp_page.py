@@ -1,6 +1,7 @@
 import socket
 import subprocess
 import time
+import os
 from urllib.parse import quote
 import pytest
 from config import browser_path
@@ -75,3 +76,32 @@ def test_hidden_page_refuses_input_instead_of_silent_click():
     page.evaluate=lambda _:'hidden';page.wait_for_timeout=lambda _:None
     with pytest.raises(RuntimeError,match='不可见'):page.bring_to_front()
     assert calls==['Page.bringToFront']
+
+
+@pytest.mark.skipif(os.name!='nt',reason='Windows native occlusion regression')
+def test_covered_window_keeps_real_renderer_and_accepts_local_input(tmp_path):
+    from core.browser_runtime import open_edge
+    executable=browser_path()
+    if not executable:pytest.skip('需要本机Edge')
+    html='<meta charset="utf-8"><textarea id="input"></textarea><button onclick="document.querySelector(\'#result\').textContent=document.querySelector(\'#input\').value">本地验证</button><p id="result"></p>'
+    ctx=open_edge(None,executable,tmp_path/'profile','data:text/html;charset=utf-8,'+quote(html),tmp_path,'test',lambda _:None)
+    try:
+        page=ctx.pages[0]
+        w=ctx.browser_client.call('Browser.getWindowForTarget',{'targetId':page.ident})
+        ctx.browser_client.call('Browser.setWindowBounds',{'windowId':w['windowId'],'bounds':{'windowState':'normal'}})
+        ctx.browser_client.call('Browser.setWindowBounds',{'windowId':w['windowId'],'bounds':{'left':0,'top':0,'width':600,'height':400}})
+        cover=ctx.browser_client.call('Target.createTarget',{'url':'data:text/html,<title>Local test cover</title><p>Only local test</p>','newWindow':True})
+        w=ctx.browser_client.call('Browser.getWindowForTarget',{'targetId':cover['targetId']})
+        ctx.browser_client.call('Browser.setWindowBounds',{'windowId':w['windowId'],'bounds':{'windowState':'normal'}})
+        ctx.browser_client.call('Browser.setWindowBounds',{'windowId':w['windowId'],'bounds':{'left':0,'top':0,'width':1200,'height':800}})
+        time.sleep(1)
+        # No visibility emulation: this must be the actual browser state while
+        # another native window covers the target window.
+        assert not page.evaluate('document.hasFocus()')
+        assert page.evaluate('document.visibilityState')=='visible'
+        page.locator('#input').fill('本地隔离验证，不向网站发送')
+        page.locator('button').click()
+        assert page.locator('#result').inner_text()=='本地隔离验证，不向网站发送'
+    finally:
+        ctx.browser_client.call('Browser.close')
+        ctx.close()
